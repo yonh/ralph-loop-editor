@@ -13,11 +13,11 @@
     "windows": [
       {
         "title": "Ralph Loop Editor",
-        "width": 900,
+        "width": 1200,
         "height": 1300,
         "resizable": true,
         "fullscreen": false,
-        "minWidth": 900,
+        "minWidth": 1200,
         "minHeight": 1300
       }
     ],

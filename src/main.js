@@ -3,16 +3,50 @@
  * Integrates xterm.js terminal component with Tauri backend
  */
 
+import { createIcons, Play, Pause, Square, ToggleLeft, ToggleRight, Plus, X, Terminal, Bug, Send, Edit2, Trash2 } from 'lucide';
 import { TerminalComponent } from './js/terminal.js';
+import { ProjectManager } from './js/project-manager.js';
 
-// Global state
+const icons = {
+  Play,
+  Pause,
+  Square,
+  ToggleLeft,
+  ToggleRight,
+  Plus,
+  X,
+  Terminal,
+  Bug,
+  Send,
+  Edit2,
+  Trash2
+};
 let invoke = null;
 let terminalComponent = null;
+let projectManager = null;
 let enabled = false;
 let running = false;
 let outputPollTimer = null;
 let statePollTimer = null;
 let lastBackendStateSignature = '';
+
+/**
+ * Refresh all Lucide icons on the page
+ */
+function refreshPageIcons() {
+  try {
+    // Always use ES-module imported icons to avoid CDN conflicts
+    createIcons({
+      icons,
+      nameAttr: 'data-lucide',
+      attrs: {
+        'stroke-width': 2,
+      }
+    });
+  } catch (err) {
+    console.error('Failed to refresh icons:', err);
+  }
+}
 
 // DOM elements
 const toggleBtn = document.getElementById('toggle-btn');
@@ -87,7 +121,7 @@ function appendTerminalOutput(chunk) {
   if (!chunk) {
     return;
   }
-  
+
   if (terminalComponent && terminalComponent.isInitialized()) {
     terminalComponent.write(chunk);
   } else {
@@ -108,7 +142,7 @@ function appendTerminalOutput(chunk) {
 async function initTerminal() {
   try {
     terminalComponent = new TerminalComponent(terminalOutput);
-    
+
     // Set resize callback to notify backend of terminal size changes
     terminalComponent.setResizeCallback(async (cols, rows) => {
       try {
@@ -119,9 +153,9 @@ async function initTerminal() {
         console.debug('PTY resize notification failed:', err);
       }
     });
-    
+
     await terminalComponent.init();
-    
+
     // Setup input handling
     terminalComponent.setupInput((data) => {
       // Forward terminal input to backend when running
@@ -129,7 +163,7 @@ async function initTerminal() {
         sendLoopInput(data);
       }
     });
-    
+
     appendDebugLog('Terminal component initialized successfully');
   } catch (error) {
     appendDebugLog('Terminal initialization failed, using fallback', error);
@@ -154,7 +188,7 @@ function switchLogTab(tab) {
   panelDebug.hidden = showTerminal;
   tabTerminal.classList.toggle('active', showTerminal);
   tabDebug.classList.toggle('active', !showTerminal);
-  
+
   // Focus terminal when switching to terminal tab
   if (showTerminal && terminalComponent) {
     terminalComponent.focus();
@@ -259,7 +293,7 @@ function stopPolling() {
  * Synchronizes the visual state with the in-memory state flags.
  */
 function syncUI() {
-  toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
+  toggleBtn.innerHTML = `<i data-lucide="${enabled ? 'toggle-right' : 'toggle-left'}"></i> ${enabled ? 'Disable' : 'Enable'}`;
   startBtn.disabled = !enabled || running;
   stopBtn.disabled = !enabled || !running;
   sendBtn.disabled = !running;
@@ -275,6 +309,18 @@ function syncUI() {
   } else {
     statusDiv.classList.add('disabled');
     statusDiv.textContent = 'Status: Disabled';
+  }
+
+  // Refresh icons for modified buttons
+  refreshPageIcons();
+
+  // Update project running states
+  if (projectManager) {
+    const currentProject = projectManager.getCurrentProject();
+    const runningProjectId = running && currentProject ? currentProject.id : null;
+    projectManager.updateAllProjectsRunningState(runningProjectId);
+    // Sync all project card toggle switches to the current global enabled state
+    projectManager.syncToggleStates(enabled);
   }
 }
 
@@ -293,18 +339,121 @@ async function sendLoopInput(input) {
 }
 
 /**
+ * Handles project run requests
+ */
+function handleProjectRun(project) {
+  console.log('[handleProjectRun] project run requested:', project.name);
+
+  // Update form with project data
+  handleProjectChange(project);
+
+  // Start the loop if enabled
+  if (enabled) {
+    handleStart();
+  } else {
+    // Enable first, then start
+    handleToggle().then(() => {
+      setTimeout(handleStart, 500);
+    }).catch(err => {
+      console.error('[handleProjectRun] failed to enable:', err);
+    });
+  }
+}
+
+/**
+ * Handles project changes
+ */
+function handleProjectChange(project) {
+  console.log('[handleProjectChange] project changed:', project?.name || 'none');
+
+  // Update form fields with project data
+  if (project) {
+    workDirInput.value = project.work_directory || '';
+    promptInput.value = project.last_prompt || '';
+    maxIterationsInput.value = project.max_iterations?.toString() || '';
+    completionPromiseInput.value = project.completion_promise || '';
+  } else {
+    // Clear form when no project selected
+    workDirInput.value = '';
+    promptInput.value = '';
+    maxIterationsInput.value = '';
+    completionPromiseInput.value = '';
+  }
+
+  // Save current prompt to project when running
+  if (running && project) {
+    const currentPrompt = promptInput.value;
+    if (currentPrompt && currentPrompt !== project.last_prompt) {
+      // Update project with new prompt
+      projectManager.updateProject(project.id, {
+        name: project.name,
+        description: project.description,
+        workDirectory: project.work_directory,
+        maxIterations: project.max_iterations,
+        completionPromise: project.completion_promise
+      }).then(() => {
+        console.log('[handleProjectChange] project prompt updated');
+      }).catch(err => {
+        console.error('[handleProjectChange] failed to update project prompt:', err);
+      });
+    }
+  }
+}
+
+/**
+ * Handles projects list update
+ */
+function handleProjectsUpdate(projects) {
+  console.log('[handleProjectsUpdate] projects updated:', projects.length);
+  // Could add additional logic here if needed
+}
+
+/**
+ * Handles project toggle (enable/disable from project card switch)
+ */
+async function handleProjectToggle(newEnabled) {
+  console.log('[handleProjectToggle] toggling enabled:', newEnabled);
+  try {
+    enabled = await invokeWithDebug('set_enabled', { enabled: newEnabled });
+    syncUI();
+    await refreshBackendDebugState();
+  } catch (err) {
+    appendDebugLog('project toggle failed', err);
+    // Revert the toggle UI on failure
+    if (projectManager) {
+      projectManager.syncToggleStates(!newEnabled);
+    }
+    alert(`切换项目状态失败: ${serializeDebugValue(err)}`);
+  }
+}
+
+/**
  * Initializes runtime binding and initial enabled state.
  */
 async function init() {
+  refreshPageIcons();
   appendDebugLog('init started');
-  
+
   try {
     await initTerminal();
     invoke = getInvoke();
     appendDebugLog('tauri runtime detected');
-    
+
+    // Initialize project manager
+    projectManager = new ProjectManager(invoke);
+    projectManager.onProjectChange = handleProjectChange;
+    projectManager.onProjectsUpdate = handleProjectsUpdate;
+    projectManager.onProjectRun = handleProjectRun;
+    projectManager.onProjectToggle = handleProjectToggle;
+    await projectManager.initialize();
+    appendDebugLog('project manager initialized');
+
     enabled = await invokeWithDebug('get_enabled');
     syncUI();
+
+    // Initial icon render
+    refreshPageIcons();
+
     startPolling();
     await refreshBackendDebugState();
     await pollLoopOutput();
@@ -335,13 +484,20 @@ async function handleToggle() {
  */
 async function handleStart() {
   appendDebugLog('start button clicked', { enabled, running });
-  
+
+  // Check if there's a current project
+  const currentProject = projectManager?.getCurrentProject();
+  if (!currentProject) {
+    alert('请先选择一个项目');
+    return;
+  }
+
   if (terminalComponent && terminalComponent.isInitialized()) {
     terminalComponent.clear();
   } else {
     terminalOutput.textContent = '';
   }
-  
+
   appendTerminalOutput('\r\n[system] starting loop process...\r\n');
   running = true;
   syncUI();
@@ -350,21 +506,38 @@ async function handleStart() {
   maxIterationsInput.disabled = true;
   completionPromiseInput.disabled = true;
 
-  const workDir = workDirInput.value || null;
+  const workDir = workDirInput.value || currentProject.work_directory;
   const prompt = promptInput.value || null;
-  const maxIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : null;
-  const completionPromise = completionPromiseInput.value || null;
+  const maxIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : currentProject.max_iterations;
+  const completionPromise = completionPromiseInput.value || currentProject.completion_promise;
+
+  // Update project with current prompt if it has changed
+  if (prompt && prompt !== currentProject.last_prompt) {
+    try {
+      await projectManager.updateProject(currentProject.id, {
+        name: currentProject.name,
+        description: currentProject.description,
+        workDirectory: currentProject.work_directory,
+        maxIterations: currentProject.max_iterations,
+        completionPromise: currentProject.completion_promise
+      });
+      // Update the prompt in the project
+      currentProject.last_prompt = prompt;
+    } catch (err) {
+      console.error('[handleStart] failed to update project prompt:', err);
+    }
+  }
 
   try {
-    await invokeWithDebug('start_loop', { 
-      workDir, 
-      prompt, 
-      maxIterations, 
-      completionPromise 
+    await invokeWithDebug('start_loop', {
+      workDir,
+      prompt,
+      maxIterations,
+      completionPromise
     });
     await refreshBackendDebugState();
     await pollLoopOutput();
-    
+
     // Focus terminal for direct input
     if (terminalComponent) {
       terminalComponent.focus();

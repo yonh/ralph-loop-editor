@@ -2,9 +2,16 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, LazyLock};
 use std::thread;
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use dirs::home_dir;
+use tokio::fs;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// Runtime session for one active loop process.
 struct LoopSession {
@@ -17,6 +24,7 @@ struct LoopSession {
 static LOOP_STATE: Mutex<Option<LoopSession>> = Mutex::new(None);
 static ENABLED_STATE: Mutex<bool> = Mutex::new(false);
 static OUTPUT_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+static PROJECT_STATE: LazyLock<AsyncMutex<ProjectState>> = LazyLock::new(|| AsyncMutex::new(ProjectState::new()));
 
 /// Maximum number of chunks kept in the in-memory output buffer.
 const OUTPUT_BUFFER_LIMIT: usize = 2_000;
@@ -26,6 +34,136 @@ const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅�
 
 /// Default max iterations for one loop run.
 const DEFAULT_MAX_ITERATIONS: u32 = 20;
+
+/// Project data structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub work_directory: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_prompt: Option<String>,
+    pub max_iterations: Option<u32>,
+    pub completion_promise: Option<String>,
+}
+
+/// Application settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub default_max_iterations: u32,
+    pub auto_save: bool,
+    pub theme: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            default_max_iterations: DEFAULT_MAX_ITERATIONS,
+            auto_save: true,
+            theme: "default".to_string(),
+        }
+    }
+}
+
+/// Complete application configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub projects: HashMap<String, Project>,
+    pub current_project_id: Option<String>,
+    pub settings: AppSettings,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            projects: HashMap::new(),
+            current_project_id: None,
+            settings: AppSettings::default(),
+        }
+    }
+}
+
+/// Project management state
+#[derive(Debug)]
+pub struct ProjectState {
+    pub config: AppConfig,
+    pub config_path: Option<String>,
+    pub initialized: bool,
+}
+
+impl ProjectState {
+    pub fn new() -> Self {
+        Self {
+            config: AppConfig::default(),
+            config_path: None,
+            initialized: false,
+        }
+    }
+
+    /// Ensure configuration is initialized
+    async fn ensure_initialized(&mut self) -> Result<(), String> {
+        if self.initialized {
+            return Ok(());
+        }
+        
+        // Get config directory path
+        let config_dir = home_dir()
+            .ok_or_else(|| "Cannot find home directory".to_string())?
+            .join(".ralph-loop-editor");
+
+        // Create config directory if it doesn't exist
+        fs::create_dir_all(&config_dir).await.map_err(|e| {
+            format!("Failed to create config directory: {}", e)
+        })?;
+
+        // Set config file path
+        let config_path = config_dir.join("config.json");
+        self.config_path = Some(config_path.to_string_lossy().to_string());
+
+        // Load existing config if it exists
+        if config_path.exists() {
+            self.load_config().await?;
+        } else {
+            // Save default config
+            self.save_config().await?;
+        }
+
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Load configuration from file
+    async fn load_config(&mut self) -> Result<(), String> {
+        let config_path = self.config_path.as_ref()
+            .ok_or_else(|| "Config path not set".to_string())?;
+
+        let content = fs::read_to_string(config_path).await
+            .map_err(|e| format!("Failed to read config file: {}", e))?;
+
+        self.config = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse config file: {}", e))?;
+
+        log::info!("[load_config] loaded configuration from {}", config_path);
+        Ok(())
+    }
+
+    /// Save configuration to file
+    async fn save_config(&self) -> Result<(), String> {
+        let config_path = self.config_path.as_ref()
+            .ok_or_else(|| "Config path not set".to_string())?;
+
+        let content = serde_json::to_string_pretty(&self.config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+        fs::write(config_path, content).await
+            .map_err(|e| format!("Failed to write config file: {}", e))?;
+
+        log::info!("[save_config] saved configuration to {}", config_path);
+        Ok(())
+    }
+}
 
 #[derive(serde::Serialize)]
 /// Snapshot of backend runtime state for diagnostics.
@@ -211,7 +349,7 @@ fn poll_loop_output() -> Result<Vec<String>, String> {
     Ok(buffer.drain(..).collect())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Sends user input to the running loop process.
 fn send_loop_input(input: String, append_newline: Option<bool>) -> Result<String, String> {
     let mut state = LOOP_STATE.lock().map_err(|err| {
@@ -242,7 +380,7 @@ fn send_loop_input(input: String, append_newline: Option<bool>) -> Result<String
     Ok("Input sent".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Resizes the PTY of the running loop process.
 fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
     log::info!("[resize_pty] called with cols={}, rows={}", cols, rows);
@@ -271,7 +409,7 @@ fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
     Ok(format!("PTY resized to {}x{}", cols, rows))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Starts the loop process in the optional working directory.
 fn start_loop(work_dir: Option<String>, prompt: Option<String>, max_iterations: Option<u32>, completion_promise: Option<String>) -> Result<String, String> {
     log::info!(
@@ -408,6 +546,214 @@ fn stop_loop() -> Result<String, String> {
     Ok("Loop stopped".to_string())
 }
 
+#[tauri::command]
+/// Get all projects
+async fn get_projects() -> Result<Vec<Project>, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_projects] failed to initialize: {}", err);
+        err
+    })?;
+
+    let projects: Vec<Project> = state.config.projects.values().cloned().collect();
+    log::info!("[get_projects] returning {} projects", projects.len());
+    Ok(projects)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Create a new project
+async fn create_project(name: String, description: String, work_directory: String) -> Result<Project, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[create_project] failed to initialize: {}", err);
+        err
+    })?;
+
+    // Validate work directory
+    if !Path::new(&work_directory).exists() {
+        return Err(format!("工作目录不存在: {}", work_directory));
+    }
+
+    // Create new project
+    let project = Project {
+        id: Uuid::new_v4().to_string(),
+        name: name.clone(),
+        description,
+        work_directory,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_prompt: None,
+        max_iterations: None,
+        completion_promise: None,
+    };
+
+    // Add to config
+    state.config.projects.insert(project.id.clone(), project.clone());
+
+    // Save config
+    if let Err(e) = state.save_config().await {
+        log::error!("[create_project] failed to save config: {}", e);
+        return Err(e);
+    }
+
+    log::info!("[create_project] created project: {} ({})", name, project.id);
+    Ok(project)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Update an existing project
+async fn update_project(project_id: String, name: String, description: String, work_directory: String, max_iterations: Option<u32>, completion_promise: Option<String>) -> Result<Project, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[update_project] failed to initialize: {}", err);
+        err
+    })?;
+
+    // Validate work directory
+    if !Path::new(&work_directory).exists() {
+        return Err(format!("工作目录不存在: {}", work_directory));
+    }
+
+    // Get existing project
+    let project = state.config.projects.get_mut(&project_id).ok_or_else(|| {
+        format!("项目不存在: {}", project_id)
+    })?;
+
+    // Update project fields
+    project.name = name;
+    project.description = description;
+    project.work_directory = work_directory;
+    project.updated_at = Utc::now();
+    project.max_iterations = max_iterations;
+    project.completion_promise = completion_promise;
+
+    let updated_project = project.clone();
+
+    // Save config
+    if let Err(e) = state.save_config().await {
+        log::error!("[update_project] failed to save config: {}", e);
+        return Err(e);
+    }
+
+    log::info!("[update_project] updated project: {} ({})", updated_project.name, project_id);
+    Ok(updated_project)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Delete a project
+async fn delete_project(project_id: String) -> Result<String, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[delete_project] failed to initialize: {}", err);
+        err
+    })?;
+
+    // Remove project first, then persist. If persistence fails, rollback in-memory state.
+    let removed_project = state.config.projects.remove(&project_id).ok_or_else(|| {
+        format!("项目不存在: {}", project_id)
+    })?;
+
+    let previous_current_project_id = state.config.current_project_id.clone();
+    if state.config.current_project_id.as_deref() == Some(project_id.as_str()) {
+        state.config.current_project_id = None;
+    }
+
+    if let Err(e) = state.save_config().await {
+        // Roll back mutation on save failure so backend state stays consistent with disk.
+        state
+            .config
+            .projects
+            .insert(project_id.clone(), removed_project);
+        state.config.current_project_id = previous_current_project_id;
+        log::error!("[delete_project] failed to save config: {}", e);
+        return Err(e);
+    }
+
+    log::info!(
+        "[delete_project] deleted project: {} ({})",
+        removed_project.name,
+        project_id
+    );
+    Ok("项目删除成功".to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Set current project
+async fn set_current_project(project_id: String) -> Result<Project, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[set_current_project] failed to initialize: {}", err);
+        err
+    })?;
+
+    // Check if project exists
+    let project = state.config.projects.get(&project_id).ok_or_else(|| {
+        format!("项目不存在: {}", project_id)
+    })?;
+
+    // Clone project before modifying state
+    let current_project = project.clone();
+    
+    // Set current project
+    state.config.current_project_id = Some(project_id.clone());
+
+    // Save config
+    if let Err(e) = state.save_config().await {
+        log::error!("[set_current_project] failed to save config: {}", e);
+        return Err(e);
+    }
+
+    log::info!("[set_current_project] set current project: {} ({})", current_project.name, project_id);
+    Ok(current_project)
+}
+
+#[tauri::command]
+/// Get current project
+async fn get_current_project() -> Result<Option<Project>, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_current_project] failed to initialize: {}", err);
+        err
+    })?;
+
+    if let Some(current_id) = &state.config.current_project_id {
+        if let Some(project) = state.config.projects.get(current_id) {
+            log::info!("[get_current_project] returning current project: {} ({})", project.name, current_id);
+            return Ok(Some(project.clone()));
+        }
+    }
+
+    log::info!("[get_current_project] no current project set");
+    Ok(None)
+}
+
+#[tauri::command]
+/// Get complete application configuration
+async fn get_app_config() -> Result<AppConfig, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    
+    // Initialize if not already done
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_app_config] failed to initialize: {}", err);
+        err
+    })?;
+
+    log::info!("[get_app_config] returning complete configuration");
+    Ok(state.config.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Runs the Tauri application and registers command handlers.
 pub fn run() {
@@ -420,7 +766,14 @@ pub fn run() {
             poll_loop_output,
             get_enabled,
             set_enabled,
-            get_runtime_debug_state
+            get_runtime_debug_state,
+            get_projects,
+            create_project,
+            update_project,
+            delete_project,
+            set_current_project,
+            get_current_project,
+            get_app_config
         ])
         .setup(|app| {
             let log_level = if cfg!(debug_assertions) {
