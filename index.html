@@ -4,17 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ralph Loop Editor</title>
+  <link rel="stylesheet" href="/node_modules/@xterm/xterm/css/xterm.css" />
   <style>
     * { box-sizing: border-box; }
     body {
       font-family: system-ui, -apple-system, sans-serif;
       display: flex;
       flex-direction: column;
-      justify-content: center;
+      justify-content: flex-start;
       align-items: center;
       min-height: 100vh;
       margin: 0;
-      padding: 20px;
+      padding: 10px;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       gap: 16px;
     }
@@ -29,8 +30,23 @@
       border-radius: 16px;
       padding: 24px;
       width: 100%;
-      max-width: 680px;
+      max-width: 1200px;
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      min-height: 85vh;
+      max-height: 95vh;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    @media (max-width: 768px) {
+      .container {
+        min-height: 90vh;
+        max-height: 98vh;
+        padding: 16px;
+      }
+      h1 {
+        font-size: 2rem;
+      }
     }
     .status {
       text-align: center;
@@ -121,6 +137,92 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .terminal-panel {
+      margin-top: 0;
+      border: none;
+      border-radius: 0;
+      overflow: hidden;
+      background: #ffffff;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .terminal-title {
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #263238;
+      background: #eceff1;
+      border-bottom: 1px solid #cfd8dc;
+    }
+    #terminal-output {
+      margin: 0;
+      padding: 0;
+      flex: 1;
+      overflow: hidden;
+      background: #0f172a;
+      min-height: 0;
+    }
+    .terminal-input-row {
+      display: flex;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid #cfd8dc;
+      background: #f8fafc;
+    }
+    #terminal-input {
+      flex: 1;
+    }
+    #send-btn {
+      background: #0ea5e9;
+      min-width: 88px;
+    }
+    .logs-tabs {
+      margin-top: 16px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .tabs-header {
+      display: flex;
+      border-bottom: 1px solid #e0e0e0;
+      background: #f8fafc;
+    }
+    .tab-btn {
+      flex: 1;
+      border: none;
+      border-right: 1px solid #e0e0e0;
+      background: transparent;
+      color: #475569;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 10px 12px;
+      cursor: pointer;
+      border-radius: 0;
+    }
+    .tab-btn:last-child {
+      border-right: none;
+    }
+    .tab-btn.active {
+      background: #ffffff;
+      color: #0f172a;
+    }
+    .tab-panel {
+      padding: 12px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .tab-panel[hidden] {
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -148,249 +250,30 @@
       <button id="stop-btn" disabled>Stop</button>
     </div>
 
-    <div class="debug-panel">
-      <div class="debug-title">Debug Logs</div>
-      <pre id="debug-log"></pre>
+    <div class="logs-tabs">
+      <div class="tabs-header">
+        <button class="tab-btn active" id="tab-terminal" data-tab="terminal">Loop Terminal</button>
+        <button class="tab-btn" id="tab-debug" data-tab="debug">Debug Logs</button>
+      </div>
+
+      <section class="tab-panel" id="panel-terminal">
+        <div class="terminal-panel" style="margin-top: 0; border: none; border-radius: 0;">
+          <div id="terminal-output"></div>
+          <div class="terminal-input-row">
+            <input type="text" id="terminal-input" placeholder="Type command/input and press Enter">
+            <button id="send-btn" disabled>Send</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-debug" hidden>
+        <div class="debug-panel" style="margin-top: 0; border: none; border-radius: 0;">
+          <pre id="debug-log"></pre>
+        </div>
+      </section>
     </div>
   </div>
 
-  <script>
-    const toggleBtn = document.getElementById('toggle-btn');
-    const startBtn = document.getElementById('start-btn');
-    const stopBtn = document.getElementById('stop-btn');
-    const statusDiv = document.getElementById('status');
-    const workDirInput = document.getElementById('work-dir');
-    const promptInput = document.getElementById('prompt');
-    const debugLog = document.getElementById('debug-log');
-
-    let invoke = null;
-    let enabled = false;
-    let running = false;
-
-    /**
-     * Returns the Tauri invoke function if available.
-     * Supports both Tauri v2 internals and legacy runtime globals.
-     * @returns {(command: string, args?: Record<string, unknown>) => Promise<unknown>}
-     */
-    function getInvoke() {
-      const tauriInternals = window.__TAURI_INTERNALS__;
-      if (tauriInternals && typeof tauriInternals.invoke === 'function') {
-        return tauriInternals.invoke;
-      }
-
-      const tauriCore = window.__TAURI__ && window.__TAURI__.core;
-      if (tauriCore && typeof tauriCore.invoke === 'function') {
-        return tauriCore.invoke;
-      }
-
-      const hasTauri = Boolean(window.__TAURI__);
-      const hasInternals = Boolean(window.__TAURI_INTERNALS__);
-      throw new Error(
-        `Tauri runtime is not available. has__TAURI__=${hasTauri}, has__TAURI_INTERNALS__=${hasInternals}.`
-      );
-    }
-
-    /**
-     * Serializes any debug value into a readable string.
-     * @param {unknown} value
-     * @returns {string}
-     */
-    function serializeDebugValue(value) {
-      if (value instanceof Error) {
-        return `${value.name}: ${value.message}`;
-      }
-      try {
-        return JSON.stringify(value);
-      } catch (_err) {
-        return String(value);
-      }
-    }
-
-    /**
-     * Appends one timestamped debug message.
-     * @param {string} message
-     * @param {unknown} [data]
-     */
-    function appendDebugLog(message, data) {
-      const timestamp = new Date().toISOString();
-      const payload = data === undefined ? '' : ` | ${serializeDebugValue(data)}`;
-      const line = `[${timestamp}] ${message}${payload}`;
-      console.log(line);
-      debugLog.textContent += `${line}\n`;
-      debugLog.scrollTop = debugLog.scrollHeight;
-    }
-
-    /**
-     * Invokes a backend command and records lifecycle logs.
-     * @template T
-     * @param {string} command
-     * @param {Record<string, unknown>} [args]
-     * @returns {Promise<T>}
-     */
-    async function invokeWithDebug(command, args) {
-      if (!invoke) {
-        throw new Error('Tauri invoke is unavailable.');
-      }
-
-      appendDebugLog(`invoke:start ${command}`, args);
-      const startedAt = Date.now();
-      try {
-        const result = await invoke(command, args);
-        appendDebugLog(`invoke:success ${command} (${Date.now() - startedAt}ms)`, result);
-        return /** @type {T} */ (result);
-      } catch (err) {
-        appendDebugLog(`invoke:failed ${command} (${Date.now() - startedAt}ms)`, err);
-        throw err;
-      }
-    }
-
-    /**
-     * Pulls runtime state from backend and logs it.
-     * @returns {Promise<void>}
-     */
-    async function refreshBackendDebugState() {
-      try {
-        const state = await invokeWithDebug('get_runtime_debug_state');
-        appendDebugLog('backend-state', state);
-      } catch (err) {
-        appendDebugLog('backend-state failed', err);
-      }
-    }
-
-    /**
-     * Synchronizes the visual state with the in-memory state flags.
-     * @returns {void}
-     */
-    function syncUI() {
-      toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
-      startBtn.disabled = !enabled || running;
-      stopBtn.disabled = !enabled || !running;
-      statusDiv.className = 'status';
-
-      if (running) {
-        statusDiv.classList.add('running');
-        statusDiv.textContent = 'Status: Running';
-      } else if (enabled) {
-        statusDiv.classList.add('enabled');
-        statusDiv.textContent = 'Status: Enabled';
-      } else {
-        statusDiv.classList.add('disabled');
-        statusDiv.textContent = 'Status: Disabled';
-      }
-    }
-
-    /**
-     * Initializes runtime binding and initial enabled state.
-     * @returns {Promise<void>}
-     */
-    async function init() {
-      appendDebugLog('init started');
-      try {
-        invoke = getInvoke();
-        appendDebugLog('tauri runtime detected');
-        enabled = await invokeWithDebug('get_enabled');
-        syncUI();
-        await refreshBackendDebugState();
-      } catch (err) {
-        appendDebugLog('init failed', err);
-        alert(`Initialization failed: ${serializeDebugValue(err)}`);
-      }
-    }
-
-    /**
-     * Handles enable/disable button clicks.
-     * @returns {Promise<void>}
-     */
-    async function handleToggle() {
-      appendDebugLog('toggle button clicked', { enabled, running });
-      try {
-        const newEnabled = !enabled;
-        enabled = await invokeWithDebug('set_enabled', { enabled: newEnabled });
-        syncUI();
-        await refreshBackendDebugState();
-      } catch (err) {
-        appendDebugLog('toggle failed', err);
-        alert(`Toggle failed: ${serializeDebugValue(err)}`);
-      }
-    }
-
-    /**
-     * Handles start button clicks.
-     * @returns {Promise<void>}
-     */
-    async function handleStart() {
-      appendDebugLog('start button clicked', { enabled, running });
-      running = true;
-      syncUI();
-      workDirInput.disabled = true;
-      promptInput.disabled = true;
-
-      const workDir = workDirInput.value || null;
-      const prompt = promptInput.value || null;
-
-      try {
-        await invokeWithDebug('start_loop', { workDir, prompt });
-        await refreshBackendDebugState();
-      } catch (err) {
-        appendDebugLog('start failed', err);
-        alert(`Start failed: ${serializeDebugValue(err)}`);
-        running = false;
-        syncUI();
-        workDirInput.disabled = false;
-        promptInput.disabled = false;
-      }
-    }
-
-    /**
-     * Handles stop button clicks.
-     * @returns {Promise<void>}
-     */
-    async function handleStop() {
-      appendDebugLog('stop button clicked', { enabled, running });
-      running = false;
-      syncUI();
-      workDirInput.disabled = false;
-      promptInput.disabled = false;
-
-      try {
-        await invokeWithDebug('stop_loop');
-        await refreshBackendDebugState();
-      } catch (err) {
-        appendDebugLog('stop failed', err);
-        alert(`Stop failed: ${serializeDebugValue(err)}`);
-      }
-    }
-
-    /**
-     * Handles global JavaScript errors.
-     * @param {ErrorEvent} event
-     * @returns {void}
-     */
-    function handleWindowError(event) {
-      appendDebugLog('window error', {
-        message: event.message,
-        filename: event.filename,
-        lineno: event.lineno,
-        colno: event.colno,
-      });
-    }
-
-    /**
-     * Handles unhandled promise rejections.
-     * @param {PromiseRejectionEvent} event
-     * @returns {void}
-     */
-    function handleUnhandledRejection(event) {
-      appendDebugLog('unhandled rejection', event.reason);
-    }
-
-    toggleBtn.addEventListener('click', handleToggle);
-    startBtn.addEventListener('click', handleStart);
-    stopBtn.addEventListener('click', handleStop);
-    window.addEventListener('error', handleWindowError);
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-
-    init();
-  </script>
+  <script type="module" src="/src/main.js"></script>
 </body>
 </html>
