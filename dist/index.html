@@ -184,16 +184,34 @@
     let enabled = false;
     let running = false;
 
-    // 启用/禁用切换
-    toggleBtn.addEventListener('click', async () => {
-      enabled = !enabled;
+    // 页面加载时从后端获取启用状态
+    async function init() {
+      try {
+        enabled = await invoke('get_enabled');
+        syncUI();
+      } catch (err) {
+        console.error('获取状态失败:', err);
+      }
+    }
+
+    // 同步UI状态
+    function syncUI() {
       toggleBtn.textContent = enabled ? '禁用' : '启用';
-      updateStatus();
       startBtn.disabled = !enabled || running;
       stopBtn.disabled = !enabled || !running;
-      // 运行时禁用输入
-      workDirInput.disabled = running;
-      promptInput.disabled = running;
+      updateStatus();
+    }
+
+    // 启用/禁用切换
+    toggleBtn.addEventListener('click', async () => {
+      const newEnabled = !enabled;
+      try {
+        enabled = await invoke('set_enabled', { enabled: newEnabled });
+        syncUI();
+      } catch (err) {
+        console.error('设置状态失败:', err);
+        alert('设置状态失败: ' + err);
+      }
     });
 
     // 开始 Loop
@@ -214,8 +232,7 @@
         console.error('启动失败:', err);
         alert('启动失败: ' + err);
         running = false;
-        startBtn.disabled = !enabled;
-        stopBtn.disabled = true;
+        syncUI();
         workDirInput.disabled = false;
         promptInput.disabled = false;
         updateStatus();
@@ -225,8 +242,7 @@
     // 停止 Loop
     stopBtn.addEventListener('click', async () => {
       running = false;
-      startBtn.disabled = !enabled;
-      stopBtn.disabled = true;
+      syncUI();
       workDirInput.disabled = false;
       promptInput.disabled = false;
       updateStatus();
@@ -246,6 +262,9 @@
         statusDiv.textContent = '状态: 未启用';
       }
     }
+
+    // 初始化
+    init();
   </script>
 </body>
 </html>

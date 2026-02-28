@@ -3,12 +3,31 @@ use std::sync::Mutex;
 use std::path::Path;
 
 static LOOP_STATE: Mutex<Option<Child>> = Mutex::new(None);
+static ENABLED_STATE: Mutex<bool> = Mutex::new(false);
 
 /// 默认任务提示词
 const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅读 任务目标.md 实现工作，每一个小迭代完毕需要提交代码，持续迭代持续总结经验";
 
 #[tauri::command]
+fn get_enabled() -> Result<bool, String> {
+    ENABLED_STATE.lock().map_err(|e| e.to_string()).map(|s| *s)
+}
+
+#[tauri::command]
+fn set_enabled(enabled: bool) -> Result<bool, String> {
+    let mut state = ENABLED_STATE.lock().map_err(|e| e.to_string())?;
+    *state = enabled;
+    Ok(enabled)
+}
+
+#[tauri::command]
 fn start_loop(work_dir: Option<String>, prompt: Option<String>) -> Result<String, String> {
+    // 检查是否已启用
+    let enabled = ENABLED_STATE.lock().map_err(|e| e.to_string())?;
+    if !*enabled {
+        return Err("应用未启用，请先点击启用按钮".to_string());
+    }
+
     let mut state = LOOP_STATE.lock().map_err(|e| e.to_string())?;
 
     if state.is_some() {
@@ -54,7 +73,12 @@ fn stop_loop() -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![start_loop, stop_loop])
+    .invoke_handler(tauri::generate_handler![
+        start_loop,
+        stop_loop,
+        get_enabled,
+        set_enabled
+    ])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(
