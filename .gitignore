@@ -1,5 +1,8 @@
 .claude
-
+dist/*
+!dist/.gitkeep
+node_modules
+.vite
 
 # Added by cargo
 
