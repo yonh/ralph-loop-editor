@@ -21,6 +21,8 @@ const stopBtn = document.getElementById('stop-btn');
 const statusDiv = document.getElementById('status');
 const workDirInput = document.getElementById('work-dir');
 const promptInput = document.getElementById('prompt');
+const maxIterationsInput = document.getElementById('max-iterations');
+const completionPromiseInput = document.getElementById('completion-promise');
 const terminalOutput = document.getElementById('terminal-output');
 const terminalInput = document.getElementById('terminal-input');
 const sendBtn = document.getElementById('send-btn');
@@ -198,6 +200,8 @@ async function refreshBackendDebugState() {
     if (previousRunning && !running) {
       workDirInput.disabled = false;
       promptInput.disabled = false;
+      maxIterationsInput.disabled = false;
+      completionPromiseInput.disabled = false;
     }
 
     syncUI();
@@ -343,12 +347,21 @@ async function handleStart() {
   syncUI();
   workDirInput.disabled = true;
   promptInput.disabled = true;
+  maxIterationsInput.disabled = true;
+  completionPromiseInput.disabled = true;
 
   const workDir = workDirInput.value || null;
   const prompt = promptInput.value || null;
+  const maxIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : null;
+  const completionPromise = completionPromiseInput.value || null;
 
   try {
-    await invokeWithDebug('start_loop', { workDir, prompt });
+    await invokeWithDebug('start_loop', { 
+      workDir, 
+      prompt, 
+      maxIterations, 
+      completionPromise 
+    });
     await refreshBackendDebugState();
     await pollLoopOutput();
     
@@ -363,6 +376,8 @@ async function handleStart() {
     syncUI();
     workDirInput.disabled = false;
     promptInput.disabled = false;
+    maxIterationsInput.disabled = false;
+    completionPromiseInput.disabled = false;
   }
 }
 
@@ -375,6 +390,8 @@ async function handleStop() {
   syncUI();
   workDirInput.disabled = false;
   promptInput.disabled = false;
+  maxIterationsInput.disabled = false;
+  completionPromiseInput.disabled = false;
 
   try {
     await invokeWithDebug('stop_loop');

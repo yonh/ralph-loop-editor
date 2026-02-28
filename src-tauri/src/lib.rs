@@ -273,11 +273,13 @@ fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
 
 #[tauri::command]
 /// Starts the loop process in the optional working directory.
-fn start_loop(work_dir: Option<String>, prompt: Option<String>) -> Result<String, String> {
+fn start_loop(work_dir: Option<String>, prompt: Option<String>, max_iterations: Option<u32>, completion_promise: Option<String>) -> Result<String, String> {
     log::info!(
-        "[start_loop] called with work_dir={:?}, prompt_provided={}",
+        "[start_loop] called with work_dir={:?}, prompt_provided={}, max_iterations={:?}, completion_promise={:?}",
         work_dir,
-        prompt.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false)
+        prompt.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
+        max_iterations,
+        completion_promise
     );
 
     let enabled = ENABLED_STATE.lock().map_err(|err| {
@@ -301,10 +303,23 @@ fn start_loop(work_dir: Option<String>, prompt: Option<String>) -> Result<String
     }
 
     let task_prompt = prompt.unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    let max_iter = max_iterations.unwrap_or(DEFAULT_MAX_ITERATIONS);
+    
+    let mut command_parts = vec![
+        format!("\"{}\"", task_prompt.replace('"', "\\\"")),
+        format!("--max-iterations {}", max_iter)
+    ];
+    
+    // Add completion promise if provided
+    if let Some(promise) = completion_promise {
+        if !promise.trim().is_empty() {
+            command_parts.push(format!("--completion-promise \"{}\"", promise.replace('"', "\\\"")));
+        }
+    }
+    
     let command_payload = format!(
-        "/ralph-loop:ralph-loop \"{}\" --max-iterations {}",
-        task_prompt.replace('"', "\\\""),
-        DEFAULT_MAX_ITERATIONS
+        "/ralph-loop:ralph-loop {}",
+        command_parts.join(" ")
     );
 
     let mut command = CommandBuilder::new("claude");
