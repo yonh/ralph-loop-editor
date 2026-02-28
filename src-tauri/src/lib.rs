@@ -1,20 +1,37 @@
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::path::Path;
 
 static LOOP_STATE: Mutex<Option<Child>> = Mutex::new(None);
 
+/// 默认任务提示词
+const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅读 任务目标.md 实现工作，每一个小迭代完毕需要提交代码，持续迭代持续总结经验";
+
 #[tauri::command]
-fn start_loop() -> Result<String, String> {
+fn start_loop(work_dir: Option<String>, prompt: Option<String>) -> Result<String, String> {
     let mut state = LOOP_STATE.lock().map_err(|e| e.to_string())?;
 
     if state.is_some() {
         return Ok("Loop already running".to_string());
     }
 
-    let child = std::process::Command::new("claude")
-        .arg("--dangerously-skip-permissions")
-        .arg("/ralph-loop:ralph-loop")
-        .arg("保持极度克制开发，实现启用禁用功能，实现开始通过claude开发任务及停止功能，除此之外不要增加任意功能")
+    // 使用用户提供的提示词或默认值
+    let task_prompt = prompt.unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+
+    let mut cmd = Command::new("claude");
+    cmd.arg("--dangerously-skip-permissions")
+       .arg("/ralph-loop:ralph-loop")
+       .arg(&task_prompt);
+
+    // 如果指定了工作目录，设置它
+    if let Some(dir) = work_dir {
+        if !Path::new(&dir).exists() {
+            return Err(format!("工作目录不存在: {}", dir));
+        }
+        cmd.current_dir(&dir);
+    }
+
+    let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start loop: {}", e))?;
 
