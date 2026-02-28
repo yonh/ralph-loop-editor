@@ -9,15 +9,19 @@ static ENABLED_STATE: Mutex<bool> = Mutex::new(false);
 const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅读 任务目标.md 实现工作，每一个小迭代完毕需要提交代码，持续迭代持续总结经验";
 
 #[tauri::command]
-fn get_enabled() -> Result<bool, String> {
-    ENABLED_STATE.lock().map_err(|e| e.to_string()).map(|s| *s)
+fn get_enabled() -> bool {
+    let state = ENABLED_STATE.lock().unwrap();
+    let value = *state;
+    log::info!("get_enabled called, returning: {}", value);
+    value
 }
 
 #[tauri::command]
-fn set_enabled(enabled: bool) -> Result<bool, String> {
-    let mut state = ENABLED_STATE.lock().map_err(|e| e.to_string())?;
+fn set_enabled(enabled: bool) -> bool {
+    let mut state = ENABLED_STATE.lock().unwrap();
     *state = enabled;
-    Ok(enabled)
+    log::info!("set_enabled called with: {}, now stored: {}", enabled, *state);
+    enabled
 }
 
 #[tauri::command]

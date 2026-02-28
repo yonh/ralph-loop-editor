@@ -4,9 +4,7 @@
   <meta charset="UTF-8">
   <title>Ralph Loop Editor</title>
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
     body {
       font-family: system-ui, -apple-system, sans-serif;
       display: flex;
@@ -41,21 +39,10 @@
       border-radius: 8px;
       background: #f5f5f5;
     }
-    .status.disabled {
-      background: #ffebee;
-      color: #c62828;
-    }
-    .status.enabled {
-      background: #e8f5e9;
-      color: #2e7d32;
-    }
-    .status.running {
-      background: #e3f2fd;
-      color: #1565c0;
-    }
-    .form-group {
-      margin-bottom: 16px;
-    }
+    .status.disabled { background: #ffebee; color: #c62828; }
+    .status.enabled { background: #e8f5e9; color: #2e7d32; }
+    .status.running { background: #e3f2fd; color: #1565c0; }
+    .form-group { margin-bottom: 16px; }
     label {
       display: block;
       font-weight: 600;
@@ -63,46 +50,28 @@
       color: #333;
       font-size: 0.9rem;
     }
-    input[type="text"] {
-      width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      font-size: 0.95rem;
-    }
-    input[type="text"]:focus {
-      outline: none;
-      border-color: #667eea;
-      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-    }
-    input[type="text"]:disabled {
-      background: #f5f5f5;
-      cursor: not-allowed;
-    }
-    textarea {
+    input[type="text"], textarea {
       width: 100%;
       padding: 10px 12px;
       border: 1px solid #ddd;
       border-radius: 6px;
       font-size: 0.95rem;
       font-family: inherit;
-      resize: vertical;
-      min-height: 80px;
     }
-    textarea:focus {
+    input[type="text"]:focus, textarea:focus {
       outline: none;
       border-color: #667eea;
       box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
     }
-    textarea:disabled {
+    input[type="text"]:disabled, textarea:disabled {
       background: #f5f5f5;
       cursor: not-allowed;
     }
-    .hint {
-      font-size: 0.8rem;
-      color: #666;
-      margin-top: 4px;
+    textarea {
+      resize: vertical;
+      min-height: 80px;
     }
+    .hint { font-size: 0.8rem; color: #666; margin-top: 4px; }
     .controls {
       display: flex;
       gap: 12px;
@@ -115,35 +84,14 @@
       border: none;
       border-radius: 8px;
       cursor: pointer;
-      transition: opacity 0.2s, transform 0.1s;
+      transition: opacity 0.2s;
     }
-    button:hover:not(:disabled) {
-      opacity: 0.8;
-    }
-    button:active:not(:disabled) {
-      transform: scale(0.98);
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    #toggle-btn {
-      background: #4caf50;
-      color: white;
-    }
-    #start-btn {
-      background: #2196f3;
-      color: white;
-    }
-    #stop-btn {
-      background: #f44336;
-      color: white;
-    }
-    .divider {
-      height: 1px;
-      background: #e0e0e0;
-      margin: 20px 0;
-    }
+    button:hover:not(:disabled) { opacity: 0.8; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #toggle-btn { background: #4caf50; color: white; }
+    #start-btn { background: #2196f3; color: white; }
+    #stop-btn { background: #f44336; color: white; }
+    .divider { height: 1px; background: #e0e0e0; margin: 20px 0; }
   </style>
 </head>
 <body>
@@ -184,72 +132,10 @@
     let enabled = false;
     let running = false;
 
-    // 页面加载时从后端获取启用状态
-    async function init() {
-      try {
-        enabled = await invoke('get_enabled');
-        syncUI();
-      } catch (err) {
-        console.error('获取状态失败:', err);
-      }
-    }
-
-    // 同步UI状态
     function syncUI() {
       toggleBtn.textContent = enabled ? '禁用' : '启用';
       startBtn.disabled = !enabled || running;
       stopBtn.disabled = !enabled || !running;
-      updateStatus();
-    }
-
-    // 启用/禁用切换
-    toggleBtn.addEventListener('click', async () => {
-      const newEnabled = !enabled;
-      try {
-        enabled = await invoke('set_enabled', { enabled: newEnabled });
-        syncUI();
-      } catch (err) {
-        console.error('设置状态失败:', err);
-        alert('设置状态失败: ' + err);
-      }
-    });
-
-    // 开始 Loop
-    startBtn.addEventListener('click', async () => {
-      running = true;
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      workDirInput.disabled = true;
-      promptInput.disabled = true;
-      updateStatus();
-
-      const workDir = workDirInput.value || null;
-      const prompt = promptInput.value || null;
-
-      try {
-        await invoke('start_loop', { workDir, prompt });
-      } catch (err) {
-        console.error('启动失败:', err);
-        alert('启动失败: ' + err);
-        running = false;
-        syncUI();
-        workDirInput.disabled = false;
-        promptInput.disabled = false;
-        updateStatus();
-      }
-    });
-
-    // 停止 Loop
-    stopBtn.addEventListener('click', async () => {
-      running = false;
-      syncUI();
-      workDirInput.disabled = false;
-      promptInput.disabled = false;
-      updateStatus();
-      await invoke('stop_loop');
-    });
-
-    function updateStatus() {
       statusDiv.className = 'status';
       if (running) {
         statusDiv.classList.add('running');
@@ -263,7 +149,49 @@
       }
     }
 
-    // 初始化
+    async function init() {
+      enabled = await invoke('get_enabled');
+      console.log('[init] enabled:', enabled);
+      syncUI();
+    }
+
+    toggleBtn.addEventListener('click', async () => {
+      const newEnabled = !enabled;
+      console.log('[toggle] setting enabled to:', newEnabled);
+      enabled = await invoke('set_enabled', { enabled: newEnabled });
+      console.log('[toggle] enabled is now:', enabled);
+      syncUI();
+    });
+
+    startBtn.addEventListener('click', async () => {
+      running = true;
+      syncUI();
+      workDirInput.disabled = true;
+      promptInput.disabled = true;
+
+      const workDir = workDirInput.value || null;
+      const prompt = promptInput.value || null;
+
+      try {
+        await invoke('start_loop', { workDir, prompt });
+      } catch (err) {
+        console.error('启动失败:', err);
+        alert('启动失败: ' + err);
+        running = false;
+        syncUI();
+        workDirInput.disabled = false;
+        promptInput.disabled = false;
+      }
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      running = false;
+      syncUI();
+      workDirInput.disabled = false;
+      promptInput.disabled = false;
+      await invoke('stop_loop');
+    });
+
     init();
   </script>
 </body>
