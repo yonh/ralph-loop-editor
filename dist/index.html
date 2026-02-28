@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Ralph Loop Editor</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      gap: 16px;
+    }
+    h1 {
+      color: white;
+      font-size: 2.5rem;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+      margin: 0 0 20px 0;
+    }
+    .status {
+      color: white;
+      font-size: 1.2rem;
+      margin-bottom: 20px;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+    }
+    button {
+      padding: 12px 24px;
+      font-size: 1rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover {
+      opacity: 0.8;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #toggle-btn {
+      background: #4caf50;
+      color: white;
+    }
+    #start-btn {
+      background: #2196f3;
+      color: white;
+    }
+    #stop-btn {
+      background: #f44336;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <h1>Ralph Loop Editor</h1>
+  <div class="status" id="status">状态: 未启用</div>
+  <div class="controls">
+    <button id="toggle-btn">启用</button>
+    <button id="start-btn" disabled>开始</button>
+    <button id="stop-btn" disabled>停止</button>
+  </div>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const toggleBtn = document.getElementById('toggle-btn');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusDiv = document.getElementById('status');
+
+    let enabled = false;
+    let running = false;
+
+    toggleBtn.addEventListener('click', async () => {
+      enabled = !enabled;
+      toggleBtn.textContent = enabled ? '禁用' : '启用';
+      statusDiv.textContent = enabled ? '状态: 已启用' : '状态: 未启用';
+      startBtn.disabled = !enabled || running;
+      stopBtn.disabled = !enabled || !running;
+    });
+
+    startBtn.addEventListener('click', async () => {
+      running = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusDiv.textContent = '状态: 运行中';
+      await invoke('start_loop');
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      running = false;
+      startBtn.disabled = !enabled;
+      stopBtn.disabled = true;
+      statusDiv.textContent = enabled ? '状态: 已启用' : '状态: 未启用';
+      await invoke('stop_loop');
+    });
+  </script>
+</body>
+</html>
