@@ -34,9 +34,30 @@ let projectAutoSaveTimer = null;
 let projectAutoSaveInFlight = false;
 let projectAutoSavePending = false;
 let outputPollInFlight = false;
+let autoRestartInFlight = false;
+const manualStopProjectIds = new Set();
+const autoCompletionStopInFlightProjectIds = new Set();
+const activeCompletionPromiseByProject = new Map();
+const recentOutputByProject = new Map();
+const runStartAtByProject = new Map();
+const waitingStateSeenAtByProject = new Map();
+const lastOutputAtByProject = new Map();
 const PROJECT_AUTO_SAVE_DELAY_MS = 700;
 const TERMINAL_HISTORY_LIMIT = 200_000;
+const AUTO_NEXT_LOOP_ENABLED = true;
+const AUTO_NEXT_LOOP_DELAY_MS = 1200;
+const AUTO_COMPLETION_WAITING_MARKERS = ['循环等待指令中', '等待指令', 'waiting for input'];
+const AUTO_COMPLETION_MIN_RUNTIME_MS = 8000;
+const AUTO_COMPLETION_WAITING_GRACE_MS = 3000;
+const DEFAULT_AUTO_IDLE_NEXT_LOOP_MS = 45_000;
+const DEFAULT_AUTO_HARD_STOP_MS = 15 * 60 * 1000;
+const IDLE_NEXT_TIMEOUT_STORAGE_KEY = 'ralph_loop_idle_next_timeout_ms';
+const HARD_STOP_TIMEOUT_STORAGE_KEY = 'ralph_loop_hard_stop_timeout_ms';
+const TERMINAL_FOCUS_CONTROL_SEQUENCES = new Set(['\u001b[I', '\u001b[O']);
 const terminalHistoryByProject = new Map();
+let autoIdleNextLoopMs = DEFAULT_AUTO_IDLE_NEXT_LOOP_MS;
+let autoHardStopMs = DEFAULT_AUTO_HARD_STOP_MS;
+let runtimeCountdownTimer = null;
 
 function getCurrentProject() {
   return projectManager?.getCurrentProject() || null;
@@ -186,6 +207,10 @@ const workDirInput = document.getElementById('work-dir');
 const promptInput = document.getElementById('prompt');
 const maxIterationsInput = document.getElementById('max-iterations');
 const completionPromiseInput = document.getElementById('completion-promise');
+const idleNextTimeoutInput = document.getElementById('idle-next-timeout-seconds');
+const hardStopTimeoutInput = document.getElementById('hard-stop-timeout-seconds');
+const idleNextCountdown = document.getElementById('idle-next-countdown');
+const hardStopCountdown = document.getElementById('hard-stop-countdown');
 const terminalOutput = document.getElementById('terminal-output');
 const terminalInput = document.getElementById('terminal-input');
 const sendBtn = document.getElementById('send-btn');
@@ -268,6 +293,144 @@ function appendTerminalOutput(chunk) {
 }
 
 /**
+ * Removes ANSI control sequences from one string.
+ */
+function stripAnsi(text) {
+  if (!text) {
+    return '';
+  }
+  return text
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b[@-Z\\-_]/g, '');
+}
+
+function parseTimeoutMsFromStorage(storageKey, fallbackMs) {
+  const raw = window.localStorage.getItem(storageKey);
+  if (!raw) {
+    return fallbackMs;
+  }
+  const parsed = parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return fallbackMs;
+  }
+  return parsed;
+}
+
+function normalizeTimeoutSecondsFromInput(rawValue, fallbackMs) {
+  const parsed = parseInt(String(rawValue || '').trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return Math.floor(fallbackMs / 1000);
+  }
+  return parsed;
+}
+
+function formatDurationSeconds(totalSeconds) {
+  if (totalSeconds <= 0) {
+    return '0s';
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function updateRuntimeCountdownDisplay() {
+  if (!idleNextCountdown || !hardStopCountdown) {
+    return;
+  }
+
+  const currentProject = getCurrentProject();
+  if (!currentProject || !isProjectRunning(currentProject.id)) {
+    const idleBase = autoIdleNextLoopMs > 0
+      ? `Idle countdown: waiting run (${formatDurationSeconds(Math.ceil(autoIdleNextLoopMs / 1000))})`
+      : 'Idle countdown: disabled';
+    const hardBase = autoHardStopMs > 0
+      ? `Hard stop countdown: waiting run (${formatDurationSeconds(Math.ceil(autoHardStopMs / 1000))})`
+      : 'Hard stop countdown: disabled';
+    idleNextCountdown.textContent = idleBase;
+    hardStopCountdown.textContent = hardBase;
+    return;
+  }
+
+  const projectId = currentProject.id;
+  const now = Date.now();
+  const startedAt = runStartAtByProject.get(projectId) || now;
+  const lastOutputAt = lastOutputAtByProject.get(projectId) || startedAt;
+  const idleRemainingMs = autoIdleNextLoopMs > 0 ? autoIdleNextLoopMs - (now - lastOutputAt) : null;
+  const hardRemainingMs = autoHardStopMs > 0 ? autoHardStopMs - (now - startedAt) : null;
+
+  idleNextCountdown.textContent = autoIdleNextLoopMs > 0
+    ? `Idle countdown: ${formatDurationSeconds(Math.max(0, Math.ceil((idleRemainingMs || 0) / 1000)))}`
+    : 'Idle countdown: disabled';
+  hardStopCountdown.textContent = autoHardStopMs > 0
+    ? `Hard stop countdown: ${formatDurationSeconds(Math.max(0, Math.ceil((hardRemainingMs || 0) / 1000)))}`
+    : 'Hard stop countdown: disabled';
+}
+
+function applyIdleNextTimeoutInput(options = {}) {
+  const { persist = true, announce = true } = options;
+  if (!idleNextTimeoutInput) {
+    return;
+  }
+  const seconds = normalizeTimeoutSecondsFromInput(idleNextTimeoutInput.value, DEFAULT_AUTO_IDLE_NEXT_LOOP_MS);
+  autoIdleNextLoopMs = seconds * 1000;
+  idleNextTimeoutInput.value = String(seconds);
+  if (persist) {
+    window.localStorage.setItem(IDLE_NEXT_TIMEOUT_STORAGE_KEY, String(autoIdleNextLoopMs));
+  }
+  if (announce) {
+    appendDebugLog('idle-next timeout updated', {
+      seconds,
+      enabled: seconds > 0
+    });
+  }
+  updateRuntimeCountdownDisplay();
+}
+
+function applyHardStopTimeoutInput(options = {}) {
+  const { persist = true, announce = true } = options;
+  if (!hardStopTimeoutInput) {
+    return;
+  }
+  const seconds = normalizeTimeoutSecondsFromInput(hardStopTimeoutInput.value, DEFAULT_AUTO_HARD_STOP_MS);
+  autoHardStopMs = seconds * 1000;
+  hardStopTimeoutInput.value = String(seconds);
+  if (persist) {
+    window.localStorage.setItem(HARD_STOP_TIMEOUT_STORAGE_KEY, String(autoHardStopMs));
+  }
+  if (announce) {
+    appendDebugLog('hard-stop timeout updated', {
+      seconds,
+      enabled: seconds > 0
+    });
+  }
+  updateRuntimeCountdownDisplay();
+}
+
+function initializeRuntimeTimeoutControls() {
+  autoIdleNextLoopMs = parseTimeoutMsFromStorage(IDLE_NEXT_TIMEOUT_STORAGE_KEY, DEFAULT_AUTO_IDLE_NEXT_LOOP_MS);
+  autoHardStopMs = parseTimeoutMsFromStorage(HARD_STOP_TIMEOUT_STORAGE_KEY, DEFAULT_AUTO_HARD_STOP_MS);
+  if (idleNextTimeoutInput) {
+    idleNextTimeoutInput.value = String(Math.floor(autoIdleNextLoopMs / 1000));
+  }
+  if (hardStopTimeoutInput) {
+    hardStopTimeoutInput.value = String(Math.floor(autoHardStopMs / 1000));
+  }
+  updateRuntimeCountdownDisplay();
+  appendDebugLog('runtime timeout controls initialized', {
+    idle_next_seconds: Math.floor(autoIdleNextLoopMs / 1000),
+    hard_stop_seconds: Math.floor(autoHardStopMs / 1000)
+  });
+}
+
+/**
  * Initializes the terminal component.
  */
 async function initTerminal() {
@@ -299,6 +462,9 @@ async function initTerminal() {
 
     // Setup input handling
     terminalComponent.setupInput((data) => {
+      if (TERMINAL_FOCUS_CONTROL_SEQUENCES.has(data)) {
+        return;
+      }
       // Forward terminal input to backend when running
       const currentProject = getCurrentProject();
       if (currentProject && isProjectRunning(currentProject.id)) {
@@ -365,10 +531,20 @@ async function refreshBackendDebugState() {
   try {
     const state = await invokeWithDebug('get_runtime_debug_state');
     const previousCurrentRunning = isCurrentProjectRunning();
+    const previousCurrentProjectId = getCurrentProject()?.id || null;
     const hasCurrentProjectEnabled = state.current_project_enabled !== null && state.current_project_enabled !== undefined;
     currentProjectEnabled = hasCurrentProjectEnabled ? Boolean(state.current_project_enabled) : false;
     runningProjectIds = new Set(Array.isArray(state.running_project_ids) ? state.running_project_ids : []);
     runningSessions = Array.isArray(state.running_sessions) ? state.running_sessions : [];
+    const now = Date.now();
+    runningSessions.forEach((session) => {
+      if (!runStartAtByProject.has(session.project_id)) {
+        runStartAtByProject.set(session.project_id, now);
+      }
+      if (!lastOutputAtByProject.has(session.project_id)) {
+        lastOutputAtByProject.set(session.project_id, now);
+      }
+    });
 
     if (projectManager && state.current_project_id && hasCurrentProjectEnabled) {
       projectManager.updateProjectEnabledState(state.current_project_id, currentProjectEnabled);
@@ -382,8 +558,20 @@ async function refreshBackendDebugState() {
 
     if (previousCurrentRunning && !isCurrentProjectRunning()) {
       appendDebugLog('current project stopped');
+      const stoppedProjectId = previousCurrentProjectId;
+      if (stoppedProjectId) {
+        recentOutputByProject.delete(stoppedProjectId);
+        activeCompletionPromiseByProject.delete(stoppedProjectId);
+        autoCompletionStopInFlightProjectIds.delete(stoppedProjectId);
+        runStartAtByProject.delete(stoppedProjectId);
+        waitingStateSeenAtByProject.delete(stoppedProjectId);
+        lastOutputAtByProject.delete(stoppedProjectId);
+        void triggerAutoNextLoop(stoppedProjectId);
+      }
     }
 
+    void inspectHardTimeoutForCurrentProject();
+    void inspectIdleForCurrentProject();
     syncUI();
   } catch (err) {
     appendDebugLog('backend-state failed', err);
@@ -419,7 +607,12 @@ async function pollLoopOutput() {
       if (!Array.isArray(chunks) || chunks.length === 0) {
         return;
       }
-      chunks.forEach((chunk) => appendProjectTerminalOutput(session.project_id, String(chunk)));
+      chunks.forEach((chunk) => {
+        const text = String(chunk);
+        lastOutputAtByProject.set(session.project_id, Date.now());
+        appendProjectTerminalOutput(session.project_id, text);
+        void inspectOutputForAutoCompletion(session.project_id, text);
+      });
     });
   } catch (err) {
     appendDebugLog('poll_loop_output failed', err);
@@ -466,6 +659,14 @@ function startPolling() {
       void refreshBackendDebugState();
     }, 3000);
   }
+
+  if (!runtimeCountdownTimer) {
+    runtimeCountdownTimer = window.setInterval(() => {
+      updateRuntimeCountdownDisplay();
+      void inspectHardTimeoutForCurrentProject();
+      void inspectIdleForCurrentProject();
+    }, 1000);
+  }
 }
 
 /**
@@ -479,6 +680,10 @@ function stopPolling() {
   if (statePollTimer) {
     clearInterval(statePollTimer);
     statePollTimer = null;
+  }
+  if (runtimeCountdownTimer) {
+    clearInterval(runtimeCountdownTimer);
+    runtimeCountdownTimer = null;
   }
 }
 
@@ -528,6 +733,7 @@ function syncUI() {
   if (projectManager) {
     projectManager.updateAllProjectsRunningState(Array.from(runningProjectIds));
   }
+  updateRuntimeCountdownDisplay();
 }
 
 /**
@@ -789,6 +995,7 @@ async function init() {
     projectManager.onProjectToggle = handleProjectToggle;
     await projectManager.initialize();
     appendDebugLog('project manager initialized');
+    initializeRuntimeTimeoutControls();
 
     currentProjectEnabled = Boolean(projectManager.getCurrentProject()?.enabled);
     syncUI();
@@ -846,12 +1053,17 @@ async function handleToggle() {
  * Handles start button clicks.
  */
 async function handleStart(options = {}) {
-  const { projectId = null } = options;
+  const {
+    projectId = null,
+    preserveTerminalHistory = false,
+    triggerSource = 'manual'
+  } = options;
   const currentProject = projectManager?.getCurrentProject();
   const targetProjectId = projectId || currentProject?.id || null;
 
   appendDebugLog('start button clicked', {
     project_id: targetProjectId,
+    trigger_source: triggerSource,
     currentProjectEnabled,
     running_count: runningProjectIds.size
   });
@@ -872,8 +1084,10 @@ async function handleStart(options = {}) {
   // Ensure latest right-side edits are persisted before run.
   await flushProjectAutoSave('before-start', { force: true });
 
-  terminalHistoryByProject.set(targetProjectId, '');
-  renderSelectedProjectTerminalHistory(currentProject);
+  if (!preserveTerminalHistory) {
+    terminalHistoryByProject.set(targetProjectId, '');
+    renderSelectedProjectTerminalHistory(currentProject);
+  }
   appendProjectTerminalOutput(targetProjectId, '\r\n[system] starting loop process...\r\n');
   syncUI();
   workDirInput.disabled = true;
@@ -888,6 +1102,19 @@ async function handleStart(options = {}) {
     ? parsedIterations
     : currentProject.max_iterations;
   const completionPromise = completionPromiseInput.value || currentProject.completion_promise;
+  const normalizedCompletionPromise = typeof completionPromise === 'string'
+    ? completionPromise.trim()
+    : '';
+  if (normalizedCompletionPromise) {
+    activeCompletionPromiseByProject.set(targetProjectId, normalizedCompletionPromise);
+  } else {
+    activeCompletionPromiseByProject.delete(targetProjectId);
+  }
+  runStartAtByProject.set(targetProjectId, Date.now());
+  lastOutputAtByProject.set(targetProjectId, Date.now());
+  recentOutputByProject.set(targetProjectId, '');
+  autoCompletionStopInFlightProjectIds.delete(targetProjectId);
+  waitingStateSeenAtByProject.delete(targetProjectId);
 
   appendDebugLog('start-context', {
     project_id: currentProject.id,
@@ -934,7 +1161,7 @@ async function handleStart(options = {}) {
  * Handles stop button clicks.
  */
 async function handleStop(options = {}) {
-  const { projectId = null, sessionId = null } = options;
+  const { projectId = null, sessionId = null, reason = 'manual' } = options;
   const currentProject = projectManager?.getCurrentProject();
   const targetSession = sessionId
     ? getRunningSessionById(sessionId)
@@ -946,6 +1173,7 @@ async function handleStop(options = {}) {
 
   appendDebugLog('stop button clicked', {
     project_id: targetProjectId,
+    reason,
     currentProjectEnabled,
     running_count: runningProjectIds.size
   });
@@ -960,6 +1188,9 @@ async function handleStop(options = {}) {
   promptInput.disabled = false;
   maxIterationsInput.disabled = false;
   completionPromiseInput.disabled = false;
+  if (reason === 'manual' && targetProjectId) {
+    manualStopProjectIds.add(targetProjectId);
+  }
 
   try {
     await invokeWithDebug('stop_loop', {
@@ -978,7 +1209,205 @@ async function handleStop(options = {}) {
   } catch (err) {
     appendDebugLog('stop failed', err);
     alert(`Stop failed: ${serializeDebugValue(err)}`);
+  } finally {
+    if (targetProjectId) {
+      autoCompletionStopInFlightProjectIds.delete(targetProjectId);
+      waitingStateSeenAtByProject.delete(targetProjectId);
+    }
   }
+}
+
+/**
+ * Schedules one automatic next loop run when a project exits naturally.
+ */
+async function triggerAutoNextLoop(projectId) {
+  if (!projectId) {
+    return;
+  }
+  if (!AUTO_NEXT_LOOP_ENABLED) {
+    return;
+  }
+  if (autoRestartInFlight) {
+    appendDebugLog('auto-next skipped because another auto-next is running', { project_id: projectId });
+    return;
+  }
+  if (manualStopProjectIds.has(projectId)) {
+    manualStopProjectIds.delete(projectId);
+    appendDebugLog('auto-next skipped because stop was manual', { project_id: projectId });
+    return;
+  }
+
+  const currentProject = getCurrentProject();
+  if (!currentProject || currentProject.id !== projectId) {
+    appendDebugLog('auto-next skipped because project is not selected in main panel', { project_id: projectId });
+    return;
+  }
+  if (!currentProjectEnabled) {
+    appendDebugLog('auto-next skipped because current project is disabled', { project_id: projectId });
+    return;
+  }
+
+  autoRestartInFlight = true;
+  try {
+    appendProjectTerminalOutput(
+      projectId,
+      `\r\n[system] loop exited, auto-starting next run in ${Math.round(AUTO_NEXT_LOOP_DELAY_MS / 1000)}s...\r\n`
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, AUTO_NEXT_LOOP_DELAY_MS));
+    await refreshBackendDebugState();
+    if (isProjectRunning(projectId)) {
+      appendDebugLog('auto-next canceled because project became running again', { project_id: projectId });
+      return;
+    }
+    if (!currentProjectEnabled) {
+      appendDebugLog('auto-next canceled because project became disabled', { project_id: projectId });
+      return;
+    }
+    await handleStart({
+      projectId,
+      preserveTerminalHistory: true,
+      triggerSource: 'auto-next'
+    });
+  } catch (err) {
+    appendDebugLog('auto-next failed', err);
+  } finally {
+    autoRestartInFlight = false;
+  }
+}
+
+/**
+ * Detects completion markers in process output and force-stops current run.
+ * This handles the case where Claude keeps the session alive in "waiting for input".
+ */
+async function inspectOutputForAutoCompletion(projectId, chunk) {
+  if (!projectId || !chunk) {
+    return;
+  }
+  if (autoCompletionStopInFlightProjectIds.has(projectId)) {
+    return;
+  }
+
+  const previous = recentOutputByProject.get(projectId) || '';
+  const merged = (previous + chunk).slice(-8000);
+  recentOutputByProject.set(projectId, merged);
+  const normalizedMerged = stripAnsi(merged);
+
+  const completionPromise = activeCompletionPromiseByProject.get(projectId) || '';
+  const customMatched = Boolean(completionPromise) && normalizedMerged.includes(completionPromise);
+  const waitingMatched = AUTO_COMPLETION_WAITING_MARKERS.some((marker) => normalizedMerged.includes(marker));
+  if (!waitingMatched) {
+    waitingStateSeenAtByProject.delete(projectId);
+    return;
+  }
+  if (!waitingStateSeenAtByProject.has(projectId)) {
+    waitingStateSeenAtByProject.set(projectId, Date.now());
+  }
+
+  const startedAt = runStartAtByProject.get(projectId) || 0;
+  if (startedAt > 0 && (Date.now() - startedAt) < AUTO_COMPLETION_MIN_RUNTIME_MS) {
+    return;
+  }
+  if (!isProjectRunning(projectId)) {
+    return;
+  }
+
+  const waitingSeenAt = waitingStateSeenAtByProject.get(projectId) || 0;
+  const waitingLongEnough = waitingSeenAt > 0 && (Date.now() - waitingSeenAt) >= AUTO_COMPLETION_WAITING_GRACE_MS;
+  const shouldStop = customMatched || waitingLongEnough;
+  if (!shouldStop) {
+    return;
+  }
+
+  autoCompletionStopInFlightProjectIds.add(projectId);
+  appendDebugLog('auto-completion marker detected', {
+    project_id: projectId,
+    marker: customMatched ? completionPromise : 'waiting-state-grace'
+  });
+  appendProjectTerminalOutput(projectId, '\r\n[system] completion marker detected, stopping current run...\r\n');
+  await handleStop({ projectId, reason: 'auto-completion' });
+}
+
+/**
+ * Hard-timeout fallback: one run exceeded max runtime, force stop immediately.
+ */
+async function inspectHardTimeoutForCurrentProject() {
+  if (autoHardStopMs <= 0) {
+    return;
+  }
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    return;
+  }
+  const projectId = currentProject.id;
+  if (!isProjectRunning(projectId)) {
+    return;
+  }
+  if (autoCompletionStopInFlightProjectIds.has(projectId)) {
+    return;
+  }
+
+  const startedAt = runStartAtByProject.get(projectId) || 0;
+  if (startedAt === 0) {
+    return;
+  }
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs < autoHardStopMs) {
+    return;
+  }
+
+  autoCompletionStopInFlightProjectIds.add(projectId);
+  appendDebugLog('hard-timeout auto-stop', {
+    project_id: projectId,
+    elapsed_ms: elapsedMs,
+    threshold_ms: autoHardStopMs
+  });
+  appendProjectTerminalOutput(projectId, '\r\n[system] hard timeout reached, stopping current run...\r\n');
+  await handleStop({ projectId, reason: 'auto-hard-timeout' });
+}
+
+/**
+ * Idle fallback: if one run stays alive but has no output for too long,
+ * force-stop it so auto-next can continue.
+ */
+async function inspectIdleForCurrentProject() {
+  if (autoIdleNextLoopMs <= 0) {
+    return;
+  }
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    return;
+  }
+  const projectId = currentProject.id;
+  if (!isProjectRunning(projectId)) {
+    return;
+  }
+  if (autoCompletionStopInFlightProjectIds.has(projectId)) {
+    return;
+  }
+
+  const startedAt = runStartAtByProject.get(projectId) || 0;
+  if (startedAt === 0) {
+    return;
+  }
+  const now = Date.now();
+  if ((now - startedAt) < AUTO_COMPLETION_MIN_RUNTIME_MS) {
+    return;
+  }
+
+  const lastOutputAt = lastOutputAtByProject.get(projectId) || startedAt;
+  const idleMs = now - lastOutputAt;
+  if (idleMs < autoIdleNextLoopMs) {
+    return;
+  }
+
+  autoCompletionStopInFlightProjectIds.add(projectId);
+  appendDebugLog('idle-timeout auto-stop', {
+    project_id: projectId,
+    idle_ms: idleMs,
+    threshold_ms: autoIdleNextLoopMs
+  });
+  appendProjectTerminalOutput(projectId, '\r\n[system] idle timeout reached, stopping current run...\r\n');
+  await handleStop({ projectId, reason: 'auto-idle-timeout' });
 }
 
 /**
@@ -1044,6 +1473,24 @@ terminalInput.addEventListener('keydown', (event) => {
   inputElement.addEventListener('input', () => queueProjectAutoSave('form-input'));
   inputElement.addEventListener('change', () => queueProjectAutoSave('form-change'));
 });
+if (idleNextTimeoutInput) {
+  idleNextTimeoutInput.addEventListener('change', () => applyIdleNextTimeoutInput());
+  idleNextTimeoutInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyIdleNextTimeoutInput();
+    }
+  });
+}
+if (hardStopTimeoutInput) {
+  hardStopTimeoutInput.addEventListener('change', () => applyHardStopTimeoutInput());
+  hardStopTimeoutInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      applyHardStopTimeoutInput();
+    }
+  });
+}
 window.addEventListener('error', handleWindowError);
 window.addEventListener('unhandledrejection', handleUnhandledRejection);
 
