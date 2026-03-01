@@ -317,6 +317,9 @@
       h1 {
         font-size: 2rem;
       }
+      .compact-row {
+        grid-template-columns: 1fr;
+      }
     }
     .status {
       text-align: center;
@@ -329,7 +332,54 @@
     .status.disabled { background: #ffebee; color: #c62828; }
     .status.enabled { background: #e8f5e9; color: #2e7d32; }
     .status.running { background: #e3f2fd; color: #1565c0; }
-    .form-group { margin-bottom: 16px; }
+    .form-group { margin-bottom: 12px; }
+    .compact-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      align-items: start;
+      margin-bottom: 12px;
+    }
+    .compact-item {
+      min-width: 0;
+    }
+    .compact-item label {
+      font-size: 0.82rem;
+      margin-bottom: 4px;
+    }
+    .compact-item .hint {
+      font-size: 0.72rem;
+      line-height: 1.35;
+      min-height: 1em;
+      margin-top: 3px;
+    }
+    .prompt-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .prompt-label-row label {
+      margin-bottom: 0;
+    }
+    .prompt-guide-btn {
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #334155;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      line-height: 1.2;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .prompt-guide-btn:hover {
+      background: #eef2ff;
+      border-color: #a5b4fc;
+      color: #1e3a8a;
+    }
     label {
       display: block;
       font-weight: 600;
@@ -358,6 +408,7 @@
     .runtime-countdown {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       color: #0f172a;
+      white-space: nowrap;
     }
     .checkbox-label {
       display: inline-flex;
@@ -777,6 +828,33 @@
     .modal-danger-btn:hover {
       background: #dc2626;
     }
+    .prompt-guide-intro {
+      margin: 0 0 10px 0;
+      color: #334155;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    .prompt-guide-list {
+      margin: 0;
+      padding-left: 18px;
+      color: #1f2937;
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+    .prompt-guide-list li + li {
+      margin-top: 8px;
+    }
+    .prompt-guide-example {
+      margin-top: 12px;
+      border: 1px solid #dbeafe;
+      background: #eff6ff;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      color: #1e3a8a;
+      white-space: pre-wrap;
+    }
 
     .delete-confirm-text {
       color: #334155;
@@ -912,7 +990,7 @@
   </style>
 </head>
 <body>
-  <h1>Ralph Loop Editor</h1>
+  <!-- <h1>Ralph Loop Editor</h1> -->
   <div class="container">
     <!-- Sidebar -->
     <div class="sidebar">
@@ -933,52 +1011,58 @@
 
     <!-- Main Content -->
     <div class="main-content">
-      <div class="status disabled" id="status">Status: No Project Selected</div>
+      <div class="status disabled" id="status">状态: 未选择项目</div>
+
+    <input type="hidden" id="work-dir">
 
     <div class="form-group">
-      <label for="work-dir">Working Directory</label>
-      <input type="text" id="work-dir" placeholder="Leave empty to use current directory">
-      <div class="hint">Ralph Loop will execute in this directory.</div>
+      <div class="prompt-label-row">
+        <label for="prompt">任务提示词</label>
+        <button type="button" class="prompt-guide-btn" id="prompt-guide-btn">更多详情</button>
+      </div>
+      <textarea id="prompt" placeholder="目标：一句话说明要实现什么
+完成标准：列出可验证结果（接口、测试、文档）
+过程要求：失败就定位并修复，直到通过
+结束输出：输出 <promise>阶段工作结束</promise>
+建议：任务越具体，循环越稳定"></textarea>
     </div>
 
-    <div class="form-group">
-      <label for="prompt">Task Prompt</label>
-      <textarea id="prompt" placeholder="Leave empty to use the default prompt."></textarea>
-      <div class="hint">Describe what you want Ralph Loop to do.</div>
+     <div class="form-group">
+      <label for="completion-promise">完成承诺标记（可选）</label>
+      <input type="text" id="completion-promise" placeholder="例如：阶段性工作结束">
+      <div class="hint">用于识别“本轮已完成”，建议与任务提示词保持一致。</div>
     </div>
 
-    <div class="form-group">
-      <label for="max-iterations">Max Iterations</label>
-      <input type="number" id="max-iterations" placeholder="20" min="1" max="100">
-      <div class="hint">Maximum number of iterations for the loop (default: 20).</div>
+    <div class="compact-row">
+      <div class="compact-item">
+        <label for="max-iterations">循环次数</label>
+        <input type="number" id="max-iterations" placeholder="20" min="1" max="100">
+        <div class="hint">单轮迭代上限</div>
+      </div>
+
+      <div class="compact-item">
+        <label for="idle-next-timeout-seconds">空闲切换(秒)</label>
+        <input type="number" id="idle-next-timeout-seconds" min="0" step="1" placeholder="45">
+        <div class="hint">0=关闭，无输出后切下一轮</div>
+        <div class="hint runtime-countdown" id="idle-next-countdown">空闲倒计时: --</div>
+      </div>
+
+      <div class="compact-item">
+        <label for="hard-stop-timeout-seconds">硬中断(秒)</label>
+        <input type="number" id="hard-stop-timeout-seconds" min="0" step="1" placeholder="900">
+        <div class="hint">0=关闭，单轮最长运行时长</div>
+        <div class="hint runtime-countdown" id="hard-stop-countdown">硬中断倒计时: --</div>
+      </div>
     </div>
 
-    <div class="form-group">
-      <label for="completion-promise">Completion Promise</label>
-      <input type="text" id="completion-promise" placeholder="Optional completion criteria">
-      <div class="hint">Optional promise or criteria for loop completion.</div>
-    </div>
-
-    <div class="form-group">
-      <label for="idle-next-timeout-seconds">Idle - Next Timeout (seconds)</label>
-      <input type="number" id="idle-next-timeout-seconds" min="0" step="1" placeholder="45">
-      <div class="hint">0 = disabled. No output for N seconds will stop current run and start next loop.</div>
-      <div class="hint runtime-countdown" id="idle-next-countdown">Idle countdown: --</div>
-    </div>
-
-    <div class="form-group">
-      <label for="hard-stop-timeout-seconds">Hard Stop Timeout (seconds)</label>
-      <input type="number" id="hard-stop-timeout-seconds" min="0" step="1" placeholder="900">
-      <div class="hint">0 = disabled. Max runtime for one loop before force stop.</div>
-      <div class="hint runtime-countdown" id="hard-stop-countdown">Hard stop countdown: --</div>
-    </div>
+   
 
     <div class="divider"></div>
 
     <div class="controls">
-      <button id="toggle-btn"><i data-lucide="toggle-left"></i> Enable Project</button>
-      <button id="start-btn" disabled><i data-lucide="play"></i> Start</button>
-      <button id="stop-btn" disabled><i data-lucide="square"></i> Stop</button>
+      <button id="toggle-btn"><i data-lucide="toggle-left"></i> 启用项目</button>
+      <button id="start-btn" disabled><i data-lucide="play"></i> 开始</button>
+      <button id="stop-btn" disabled><i data-lucide="square"></i> 停止</button>
     </div>
     <div class="running-sessions" id="running-sessions" hidden>
       <span class="running-sessions-label">运行中任务</span>
@@ -987,16 +1071,16 @@
 
     <div class="logs-tabs">
       <div class="tabs-header">
-        <button class="tab-btn active" id="tab-terminal" data-tab="terminal"><i data-lucide="terminal"></i> Loop Terminal</button>
-        <button class="tab-btn" id="tab-debug" data-tab="debug"><i data-lucide="bug"></i> Debug Logs</button>
+        <button class="tab-btn active" id="tab-terminal" data-tab="terminal"><i data-lucide="terminal"></i> 循环终端</button>
+        <button class="tab-btn" id="tab-debug" data-tab="debug"><i data-lucide="bug"></i> 调试日志</button>
       </div>
 
       <section class="tab-panel" id="panel-terminal">
         <div class="terminal-panel" style="margin-top: 0; border: none; border-radius: 0;">
           <div id="terminal-output"></div>
           <div class="terminal-input-row">
-            <input type="text" id="terminal-input" placeholder="Type command/input and press Enter">
-            <button id="send-btn" disabled><i data-lucide="send"></i> Send</button>
+            <input type="text" id="terminal-input" placeholder="输入指令后回车发送">
+            <button id="send-btn" disabled><i data-lucide="send"></i> 发送</button>
           </div>
         </div>
       </section>
@@ -1006,6 +1090,48 @@
           <pre id="debug-log"></pre>
         </div>
       </section>
+    </div>
+  </div>
+
+  <!-- Prompt Guide Modal -->
+  <div class="modal hidden" id="prompt-guide-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title">提示词高级示例</h2>
+        <button class="modal-close-btn" id="prompt-guide-close-btn" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="prompt-guide-intro">高质量提示词重点：明确验收、阶段推进、自纠错闭环，并设置迭代上限避免无限循环。</p>
+        <ul class="prompt-guide-list">
+          <li>写清完成标准：功能、测试、文档都要可验证，最后输出固定承诺词。</li>
+          <li>拆分增量阶段：每轮只做一个小目标，完成后再进入下一阶段。</li>
+          <li>要求自我修复：测试失败要定位原因、修复并重试，不通过不能跳步。</li>
+          <li>给出兜底策略：多轮仍失败时输出阻塞点、已尝试方案和建议下一步。</li>
+        </ul>
+        <div class="prompt-guide-example">实现 Todo REST API（Node.js）。
+
+完成标准：
+- CRUD 接口全部可用并通过输入校验
+- 测试覆盖率 >= 80%，lint 无错误
+- README 包含启动方式与接口示例
+
+执行流程：
+1. 先写失败测试
+2. 最小实现让测试通过
+3. 运行测试与 lint
+4. 失败则定位并修复后重试
+5. 通过后再进入下一项
+
+若连续 12 轮仍未完成：
+- 输出阻塞原因
+- 列出已尝试方案
+- 给出建议的人工介入点
+
+全部完成后输出：&lt;promise&gt;阶段工作结束&lt;/promise&gt;</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-save-btn" id="prompt-guide-ok-btn">我知道了</button>
+      </div>
     </div>
   </div>
 

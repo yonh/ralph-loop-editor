@@ -221,6 +221,26 @@ const panelTerminal = document.getElementById('panel-terminal');
 const panelDebug = document.getElementById('panel-debug');
 const runningSessionsContainer = document.getElementById('running-sessions');
 const runningSessionsList = document.getElementById('running-sessions-list');
+const promptGuideBtn = document.getElementById('prompt-guide-btn');
+const promptGuideModal = document.getElementById('prompt-guide-modal');
+const promptGuideCloseBtn = document.getElementById('prompt-guide-close-btn');
+const promptGuideOkBtn = document.getElementById('prompt-guide-ok-btn');
+
+function openPromptGuideModal() {
+  if (!promptGuideModal) {
+    return;
+  }
+  promptGuideModal.classList.remove('hidden');
+  promptGuideModal.classList.add('visible');
+}
+
+function closePromptGuideModal() {
+  if (!promptGuideModal) {
+    return;
+  }
+  promptGuideModal.classList.remove('visible');
+  promptGuideModal.classList.add('hidden');
+}
 
 /**
  * Returns the Tauri invoke function if available.
@@ -240,7 +260,7 @@ function getInvoke() {
   const hasTauri = Boolean(window.__TAURI__);
   const hasInternals = Boolean(window.__TAURI_INTERNALS__);
   throw new Error(
-    `Tauri runtime is not available. has__TAURI__=${hasTauri}, has__TAURI_INTERNALS__=${hasInternals}.`
+    `Tauri 运行时不可用。has__TAURI__=${hasTauri}, has__TAURI_INTERNALS__=${hasInternals}.`
   );
 }
 
@@ -349,11 +369,11 @@ function updateRuntimeCountdownDisplay() {
   const currentProject = getCurrentProject();
   if (!currentProject || !isProjectRunning(currentProject.id)) {
     const idleBase = autoIdleNextLoopMs > 0
-      ? `Idle countdown: waiting run (${formatDurationSeconds(Math.ceil(autoIdleNextLoopMs / 1000))})`
-      : 'Idle countdown: disabled';
+      ? `空闲倒计时: 等待运行 (${formatDurationSeconds(Math.ceil(autoIdleNextLoopMs / 1000))})`
+      : '空闲倒计时: 已关闭';
     const hardBase = autoHardStopMs > 0
-      ? `Hard stop countdown: waiting run (${formatDurationSeconds(Math.ceil(autoHardStopMs / 1000))})`
-      : 'Hard stop countdown: disabled';
+      ? `硬中断倒计时: 等待运行 (${formatDurationSeconds(Math.ceil(autoHardStopMs / 1000))})`
+      : '硬中断倒计时: 已关闭';
     idleNextCountdown.textContent = idleBase;
     hardStopCountdown.textContent = hardBase;
     return;
@@ -367,11 +387,11 @@ function updateRuntimeCountdownDisplay() {
   const hardRemainingMs = autoHardStopMs > 0 ? autoHardStopMs - (now - startedAt) : null;
 
   idleNextCountdown.textContent = autoIdleNextLoopMs > 0
-    ? `Idle countdown: ${formatDurationSeconds(Math.max(0, Math.ceil((idleRemainingMs || 0) / 1000)))}`
-    : 'Idle countdown: disabled';
+    ? `空闲倒计时: ${formatDurationSeconds(Math.max(0, Math.ceil((idleRemainingMs || 0) / 1000)))}`
+    : '空闲倒计时: 已关闭';
   hardStopCountdown.textContent = autoHardStopMs > 0
-    ? `Hard stop countdown: ${formatDurationSeconds(Math.max(0, Math.ceil((hardRemainingMs || 0) / 1000)))}`
-    : 'Hard stop countdown: disabled';
+    ? `硬中断倒计时: ${formatDurationSeconds(Math.max(0, Math.ceil((hardRemainingMs || 0) / 1000)))}`
+    : '硬中断倒计时: 已关闭';
 }
 
 function applyIdleNextTimeoutInput(options = {}) {
@@ -386,7 +406,7 @@ function applyIdleNextTimeoutInput(options = {}) {
     window.localStorage.setItem(IDLE_NEXT_TIMEOUT_STORAGE_KEY, String(autoIdleNextLoopMs));
   }
   if (announce) {
-    appendDebugLog('idle-next timeout updated', {
+    appendDebugLog('空闲切换超时已更新', {
       seconds,
       enabled: seconds > 0
     });
@@ -406,7 +426,7 @@ function applyHardStopTimeoutInput(options = {}) {
     window.localStorage.setItem(HARD_STOP_TIMEOUT_STORAGE_KEY, String(autoHardStopMs));
   }
   if (announce) {
-    appendDebugLog('hard-stop timeout updated', {
+    appendDebugLog('硬中断超时已更新', {
       seconds,
       enabled: seconds > 0
     });
@@ -424,7 +444,7 @@ function initializeRuntimeTimeoutControls() {
     hardStopTimeoutInput.value = String(Math.floor(autoHardStopMs / 1000));
   }
   updateRuntimeCountdownDisplay();
-  appendDebugLog('runtime timeout controls initialized', {
+  appendDebugLog('运行超时控制已初始化', {
     idle_next_seconds: Math.floor(autoIdleNextLoopMs / 1000),
     hard_stop_seconds: Math.floor(autoHardStopMs / 1000)
   });
@@ -696,7 +716,7 @@ function syncUI() {
   const currentProjectRunning = hasCurrentProject && isProjectRunning(currentProject.id);
   const runningCount = runningProjectIds.size;
   toggleBtn.disabled = !hasCurrentProject || currentProjectRunning;
-  toggleBtn.innerHTML = `<i data-lucide="${currentProjectEnabled ? 'toggle-right' : 'toggle-left'}"></i> ${currentProjectEnabled ? 'Disable Project' : 'Enable Project'}`;
+  toggleBtn.innerHTML = `<i data-lucide="${currentProjectEnabled ? 'toggle-right' : 'toggle-left'}"></i> ${currentProjectEnabled ? '禁用项目' : '启用项目'}`;
   startBtn.disabled = !hasCurrentProject || !currentProjectEnabled || currentProjectRunning;
   stopBtn.disabled = !currentProjectRunning;
   sendBtn.disabled = !currentProjectRunning;
@@ -709,19 +729,19 @@ function syncUI() {
 
   if (currentProjectRunning) {
     statusDiv.classList.add('running');
-    statusDiv.textContent = `Status: Running (${runningCount} task${runningCount === 1 ? '' : 's'})`;
+    statusDiv.textContent = `状态: 运行中 (${runningCount} 个任务)`;
   } else if (!hasCurrentProject) {
     statusDiv.classList.add('disabled');
-    statusDiv.textContent = 'Status: No Project Selected';
+    statusDiv.textContent = '状态: 未选择项目';
   } else if (runningCount > 0) {
     statusDiv.classList.add('enabled');
-    statusDiv.textContent = `Status: Current Idle (${runningCount} task${runningCount === 1 ? '' : 's'} running)`;
+    statusDiv.textContent = `状态: 当前项目空闲 (另有 ${runningCount} 个任务运行)`;
   } else if (currentProjectEnabled) {
     statusDiv.classList.add('enabled');
-    statusDiv.textContent = 'Status: Project Enabled';
+    statusDiv.textContent = '状态: 项目已启用';
   } else {
     statusDiv.classList.add('disabled');
-    statusDiv.textContent = 'Status: Project Disabled';
+    statusDiv.textContent = '状态: 项目已禁用';
   }
 
   renderRunningSessionsBar();
@@ -1008,7 +1028,7 @@ async function init() {
     await pollLoopOutput();
   } catch (err) {
     appendDebugLog('init failed', err);
-    alert(`Initialization failed: ${serializeDebugValue(err)}`);
+    alert(`初始化失败: ${serializeDebugValue(err)}`);
   }
 }
 
@@ -1044,7 +1064,7 @@ async function handleToggle() {
     return true;
   } catch (err) {
     appendDebugLog('toggle failed', err);
-    alert(`Toggle failed: ${serializeDebugValue(err)}`);
+    alert(`切换失败: ${serializeDebugValue(err)}`);
     return false;
   }
 }
@@ -1148,7 +1168,7 @@ async function handleStart(options = {}) {
     }
   } catch (err) {
     appendDebugLog('start failed', err);
-    alert(`Start failed: ${serializeDebugValue(err)}`);
+    alert(`启动失败: ${serializeDebugValue(err)}`);
     syncUI();
     workDirInput.disabled = false;
     promptInput.disabled = false;
@@ -1208,7 +1228,7 @@ async function handleStop(options = {}) {
     }
   } catch (err) {
     appendDebugLog('stop failed', err);
-    alert(`Stop failed: ${serializeDebugValue(err)}`);
+    alert(`停止失败: ${serializeDebugValue(err)}`);
   } finally {
     if (targetProjectId) {
       autoCompletionStopInFlightProjectIds.delete(targetProjectId);
@@ -1430,7 +1450,7 @@ async function handleSendInput() {
     terminalInput.value = '';
   } catch (err) {
     appendDebugLog('send input failed', err);
-    alert(`Send input failed: ${serializeDebugValue(err)}`);
+    alert(`发送输入失败: ${serializeDebugValue(err)}`);
   }
 }
 
@@ -1491,6 +1511,27 @@ if (hardStopTimeoutInput) {
     }
   });
 }
+if (promptGuideBtn) {
+  promptGuideBtn.addEventListener('click', openPromptGuideModal);
+}
+if (promptGuideCloseBtn) {
+  promptGuideCloseBtn.addEventListener('click', closePromptGuideModal);
+}
+if (promptGuideOkBtn) {
+  promptGuideOkBtn.addEventListener('click', closePromptGuideModal);
+}
+if (promptGuideModal) {
+  promptGuideModal.addEventListener('click', (event) => {
+    if (event.target === promptGuideModal) {
+      closePromptGuideModal();
+    }
+  });
+}
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && promptGuideModal?.classList.contains('visible')) {
+    closePromptGuideModal();
+  }
+});
 window.addEventListener('error', handleWindowError);
 window.addEventListener('unhandledrejection', handleUnhandledRejection);
 
