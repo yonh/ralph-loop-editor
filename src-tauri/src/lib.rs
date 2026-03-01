@@ -1,7 +1,7 @@
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, LazyLock};
 use std::thread;
 use std::time::Duration;
@@ -34,6 +34,8 @@ const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅�
 
 /// Default max iterations for one loop run.
 const DEFAULT_MAX_ITERATIONS: u32 = 20;
+const CLAUDE_SETTINGS_DIR_NAME: &str = "claude-settings";
+const CLAUDE_PROJECT_SETTINGS_FILE_NAME: &str = "settings.local.json";
 
 /// Project data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,28 @@ pub struct Project {
     pub last_prompt: Option<String>,
     pub max_iterations: Option<u32>,
     pub completion_promise: Option<String>,
+    pub claude_setting_id: Option<String>,
+    #[serde(default)]
+    pub overwrite_claude_settings_on_create: bool,
+}
+
+/// Claude settings file metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeSettingFile {
+    pub id: String,
+    pub name: String,
+    pub file_name: String,
+    pub file_path: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Claude setting file content payload for editing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeSettingFileContent {
+    pub id: String,
+    pub name: String,
+    pub content: String,
 }
 
 /// Application settings
@@ -73,6 +97,8 @@ pub struct AppConfig {
     pub projects: HashMap<String, Project>,
     pub current_project_id: Option<String>,
     pub settings: AppSettings,
+    #[serde(default)]
+    pub claude_settings: HashMap<String, ClaudeSettingFile>,
 }
 
 impl Default for AppConfig {
@@ -81,6 +107,7 @@ impl Default for AppConfig {
             projects: HashMap::new(),
             current_project_id: None,
             settings: AppSettings::default(),
+            claude_settings: HashMap::new(),
         }
     }
 }
@@ -109,9 +136,7 @@ impl ProjectState {
         }
         
         // Get config directory path
-        let config_dir = home_dir()
-            .ok_or_else(|| "Cannot find home directory".to_string())?
-            .join(".ralph-loop-editor");
+        let config_dir = get_app_config_dir()?;
 
         // Create config directory if it doesn't exist
         fs::create_dir_all(&config_dir).await.map_err(|e| {
@@ -165,12 +190,177 @@ impl ProjectState {
     }
 }
 
+/// Returns Ralph Loop Editor application config directory path.
+fn get_app_config_dir() -> Result<PathBuf, String> {
+    Ok(
+        home_dir()
+            .ok_or_else(|| "Cannot find home directory".to_string())?
+            .join(".ralph-loop-editor"),
+    )
+}
+
+/// Ensures and returns the Claude settings file storage directory.
+async fn ensure_claude_settings_dir() -> Result<PathBuf, String> {
+    let settings_dir = get_app_config_dir()?.join(CLAUDE_SETTINGS_DIR_NAME);
+    fs::create_dir_all(&settings_dir)
+        .await
+        .map_err(|err| format!("Failed to create Claude settings directory: {}", err))?;
+    Ok(settings_dir)
+}
+
+/// Trims and normalizes optional input strings.
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Converts a setting display name into a filesystem-safe file stem.
+fn sanitize_setting_name(name: &str) -> String {
+    let mut output = String::new();
+    let mut previous_is_dash = false;
+
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            output.push(ch.to_ascii_lowercase());
+            previous_is_dash = false;
+            continue;
+        }
+
+        if !previous_is_dash {
+            output.push('-');
+            previous_is_dash = true;
+        }
+    }
+
+    let normalized = output.trim_matches('-');
+    if normalized.is_empty() {
+        "setting".to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+/// Picks a non-conflicting setting display name.
+fn build_unique_setting_name(state: &ProjectState, base_name: &str) -> String {
+    if !state
+        .config
+        .claude_settings
+        .values()
+        .any(|setting| setting.name == base_name)
+    {
+        return base_name.to_string();
+    }
+
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{} {}", base_name, index);
+        if !state
+            .config
+            .claude_settings
+            .values()
+            .any(|setting| setting.name == candidate)
+        {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+/// Imports workdir `.claude/settings.local.json` into managed settings and returns new setting id.
+async fn import_local_workdir_setting_if_present(
+    state: &mut ProjectState,
+    project_name: &str,
+    work_directory: &str,
+) -> Result<Option<String>, String> {
+    let local_setting_path = Path::new(work_directory)
+        .join(".claude")
+        .join(CLAUDE_PROJECT_SETTINGS_FILE_NAME);
+    if !local_setting_path.exists() {
+        return Ok(None);
+    }
+
+    let raw_content = fs::read_to_string(&local_setting_path)
+        .await
+        .map_err(|err| format!("读取本地 Claude setting 失败 '{}': {}", local_setting_path.display(), err))?;
+    let normalized_content = match serde_json::from_str::<serde_json::Value>(&raw_content) {
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or(raw_content.clone()),
+        Err(_) => raw_content.clone(),
+    };
+
+    let settings_dir = ensure_claude_settings_dir().await?;
+    let base_display_name = if project_name.trim().is_empty() {
+        "workdir-local-setting".to_string()
+    } else {
+        format!("{} (workdir)", project_name.trim())
+    };
+    let display_name = build_unique_setting_name(state, &base_display_name);
+    let file_stem = sanitize_setting_name(&display_name);
+    let file_name = format!("{}-{}.json", file_stem, &Uuid::new_v4().to_string()[..8]);
+    let file_path = settings_dir.join(&file_name);
+
+    fs::write(&file_path, normalized_content)
+        .await
+        .map_err(|err| format!("写入导入 setting 文件失败 '{}': {}", file_path.display(), err))?;
+
+    let now = Utc::now();
+    let setting = ClaudeSettingFile {
+        id: Uuid::new_v4().to_string(),
+        name: display_name,
+        file_name,
+        file_path: file_path.to_string_lossy().to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    let setting_id = setting.id.clone();
+    state.config.claude_settings.insert(setting.id.clone(), setting);
+    Ok(Some(setting_id))
+}
+
+/// Writes one Claude setting file into project `.claude/settings.local.json`.
+async fn apply_claude_setting_to_work_directory(setting_file_path: &str, work_directory: &str) -> Result<(), String> {
+    let setting_content = fs::read_to_string(setting_file_path)
+        .await
+        .map_err(|err| format!("Failed to read Claude setting file '{}': {}", setting_file_path, err))?;
+
+    let claude_dir = Path::new(work_directory).join(".claude");
+    fs::create_dir_all(&claude_dir)
+        .await
+        .map_err(|err| format!("Failed to create .claude directory '{}': {}", claude_dir.display(), err))?;
+
+    let project_setting_path = claude_dir.join(CLAUDE_PROJECT_SETTINGS_FILE_NAME);
+    fs::write(&project_setting_path, setting_content)
+        .await
+        .map_err(|err| format!("Failed to write project Claude setting '{}': {}", project_setting_path.display(), err))?;
+
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 /// Snapshot of backend runtime state for diagnostics.
 struct RuntimeDebugState {
     enabled: bool,
     loop_running: bool,
     loop_pid: Option<u32>,
+}
+
+#[derive(Serialize)]
+/// Claude runtime context snapshot for diagnosing settings resolution.
+struct ClaudeRuntimeDebugContext {
+    work_dir: String,
+    claude_dir_exists: bool,
+    settings_file_path: String,
+    settings_file_exists: bool,
+    settings_file_size: Option<u64>,
+    model: Option<String>,
+    env_anthropic_model: Option<String>,
+    env_anthropic_base_url: Option<String>,
+    env_disable_nonessential_traffic: Option<String>,
 }
 
 /// Pushes a chunk into the output buffer and trims old entries.
@@ -347,6 +537,66 @@ fn poll_loop_output() -> Result<Vec<String>, String> {
     })?;
 
     Ok(buffer.drain(..).collect())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Returns runtime Claude settings file info for a work directory.
+async fn inspect_claude_runtime_context(work_dir: String) -> Result<ClaudeRuntimeDebugContext, String> {
+    let work_dir_path = Path::new(&work_dir);
+    let claude_dir = work_dir_path.join(".claude");
+    let settings_path = claude_dir.join(CLAUDE_PROJECT_SETTINGS_FILE_NAME);
+
+    let claude_dir_exists = claude_dir.exists();
+    let settings_file_exists = settings_path.exists();
+
+    let mut context = ClaudeRuntimeDebugContext {
+        work_dir: work_dir.clone(),
+        claude_dir_exists,
+        settings_file_path: settings_path.to_string_lossy().to_string(),
+        settings_file_exists,
+        settings_file_size: None,
+        model: None,
+        env_anthropic_model: None,
+        env_anthropic_base_url: None,
+        env_disable_nonessential_traffic: None,
+    };
+
+    if !settings_file_exists {
+        return Ok(context);
+    }
+
+    let metadata = fs::metadata(&settings_path)
+        .await
+        .map_err(|err| format!("读取 settings 文件元信息失败 '{}': {}", settings_path.display(), err))?;
+    context.settings_file_size = Some(metadata.len());
+
+    let raw = fs::read_to_string(&settings_path)
+        .await
+        .map_err(|err| format!("读取 settings 文件失败 '{}': {}", settings_path.display(), err))?;
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+        context.model = value
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        context.env_anthropic_model = value
+            .get("env")
+            .and_then(|v| v.get("ANTHROPIC_MODEL"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        context.env_anthropic_base_url = value
+            .get("env")
+            .and_then(|v| v.get("ANTHROPIC_BASE_URL"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        context.env_disable_nonessential_traffic = value
+            .get("env")
+            .and_then(|v| v.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+
+    Ok(context)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -564,7 +814,13 @@ async fn get_projects() -> Result<Vec<Project>, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 /// Create a new project
-async fn create_project(name: String, description: String, work_directory: String) -> Result<Project, String> {
+async fn create_project(
+    name: String,
+    description: String,
+    work_directory: String,
+    claude_setting_id: Option<String>,
+    overwrite_claude_settings: Option<bool>,
+) -> Result<Project, String> {
     let mut state = PROJECT_STATE.lock().await;
     
     // Initialize if not already done
@@ -574,8 +830,45 @@ async fn create_project(name: String, description: String, work_directory: Strin
     })?;
 
     // Validate work directory
-    if !Path::new(&work_directory).exists() {
-        return Err(format!("工作目录不存在: {}", work_directory));
+    let work_dir_path = Path::new(&work_directory);
+    if work_dir_path.exists() {
+        if !work_dir_path.is_dir() {
+            return Err(format!("工作目录路径不是目录: {}", work_directory));
+        }
+    } else {
+        fs::create_dir_all(work_dir_path)
+            .await
+            .map_err(|err| format!("创建工作目录失败 '{}': {}", work_directory, err))?;
+    }
+
+    let mut resolved_claude_setting_id = normalize_optional_string(claude_setting_id);
+    if resolved_claude_setting_id.is_none() {
+        if let Some(imported_setting_id) =
+            import_local_workdir_setting_if_present(&mut state, &name, &work_directory).await?
+        {
+            resolved_claude_setting_id = Some(imported_setting_id);
+        }
+    }
+
+    let selected_claude_setting = if let Some(setting_id) = resolved_claude_setting_id.as_ref() {
+        Some(
+            state
+                .config
+                .claude_settings
+                .get(setting_id)
+                .cloned()
+                .ok_or_else(|| format!("Claude setting 文件不存在: {}", setting_id))?,
+        )
+    } else {
+        None
+    };
+
+    let should_overwrite_claude_settings = overwrite_claude_settings.unwrap_or(false);
+    if should_overwrite_claude_settings {
+        let selected = selected_claude_setting.as_ref().ok_or_else(|| {
+            "勾选了覆盖 .claude 配置，但未选择 Claude setting 文件".to_string()
+        })?;
+        apply_claude_setting_to_work_directory(&selected.file_path, &work_directory).await?;
     }
 
     // Create new project
@@ -589,6 +882,8 @@ async fn create_project(name: String, description: String, work_directory: Strin
         last_prompt: None,
         max_iterations: None,
         completion_promise: None,
+        claude_setting_id: resolved_claude_setting_id,
+        overwrite_claude_settings_on_create: should_overwrite_claude_settings,
     };
 
     // Add to config
@@ -604,9 +899,285 @@ async fn create_project(name: String, description: String, work_directory: Strin
     Ok(project)
 }
 
+#[tauri::command]
+/// Get all stored Claude setting files.
+async fn get_claude_settings_files() -> Result<Vec<ClaudeSettingFile>, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_claude_settings_files] failed to initialize: {}", err);
+        err
+    })?;
+
+    let mut settings: Vec<ClaudeSettingFile> = state.config.claude_settings.values().cloned().collect();
+    settings.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    Ok(settings)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Create or overwrite one Claude setting file template.
+async fn create_claude_settings_file(
+    name: String,
+    content: String,
+    overwrite: Option<bool>,
+) -> Result<ClaudeSettingFile, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[create_claude_settings_file] failed to initialize: {}", err);
+        err
+    })?;
+
+    let normalized_name = name.trim().to_string();
+    if normalized_name.is_empty() {
+        return Err("setting 名称不能为空".to_string());
+    }
+
+    let parsed_json: serde_json::Value = serde_json::from_str(content.trim())
+        .map_err(|err| format!("setting 文件内容不是合法 JSON: {}", err))?;
+    let pretty_content = serde_json::to_string_pretty(&parsed_json)
+        .map_err(|err| format!("格式化 setting 内容失败: {}", err))?;
+
+    let should_overwrite = overwrite.unwrap_or(false);
+    let settings_dir = ensure_claude_settings_dir().await?;
+    let existing_setting = state
+        .config
+        .claude_settings
+        .values()
+        .find(|setting| setting.name == normalized_name)
+        .cloned();
+
+    let now = Utc::now();
+    let setting = match existing_setting {
+        Some(mut existing) => {
+            if !should_overwrite {
+                return Err(format!(
+                    "已存在同名 setting 文件: {}，如需覆盖请勾选覆盖",
+                    normalized_name
+                ));
+            }
+
+            existing.updated_at = now;
+            existing
+        }
+        None => {
+            let file_stem = sanitize_setting_name(&normalized_name);
+            let mut file_name = format!("{}.json", file_stem);
+            let mut file_path = settings_dir.join(&file_name);
+            if file_path.exists() {
+                file_name = format!("{}-{}.json", file_stem, &Uuid::new_v4().to_string()[..8]);
+                file_path = settings_dir.join(&file_name);
+            }
+
+            ClaudeSettingFile {
+                id: Uuid::new_v4().to_string(),
+                name: normalized_name.clone(),
+                file_name,
+                file_path: file_path.to_string_lossy().to_string(),
+                created_at: now,
+                updated_at: now,
+            }
+        }
+    };
+
+    let target_path = if setting.file_path.trim().is_empty() {
+        settings_dir.join(&setting.file_name)
+    } else {
+        PathBuf::from(&setting.file_path)
+    };
+    fs::write(&target_path, pretty_content)
+        .await
+        .map_err(|err| format!("写入 setting 文件失败 '{}': {}", target_path.display(), err))?;
+
+    let mut stored_setting = setting.clone();
+    stored_setting.file_path = target_path.to_string_lossy().to_string();
+    state
+        .config
+        .claude_settings
+        .insert(stored_setting.id.clone(), stored_setting.clone());
+
+    if let Err(err) = state.save_config().await {
+        log::error!("[create_claude_settings_file] failed to save config: {}", err);
+        return Err(err);
+    }
+
+    Ok(stored_setting)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Get one Claude setting file content by id.
+async fn get_claude_settings_file_content(setting_id: String) -> Result<ClaudeSettingFileContent, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_claude_settings_file_content] failed to initialize: {}", err);
+        err
+    })?;
+
+    let setting = state
+        .config
+        .claude_settings
+        .get(setting_id.trim())
+        .cloned()
+        .ok_or_else(|| format!("Claude setting 文件不存在: {}", setting_id))?;
+
+    let content = fs::read_to_string(&setting.file_path)
+        .await
+        .map_err(|err| format!("读取 setting 文件失败 '{}': {}", setting.file_path, err))?;
+
+    Ok(ClaudeSettingFileContent {
+        id: setting.id,
+        name: setting.name,
+        content,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Update existing Claude setting file content (and optionally rename).
+async fn update_claude_settings_file(
+    setting_id: String,
+    name: String,
+    content: String,
+) -> Result<ClaudeSettingFile, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[update_claude_settings_file] failed to initialize: {}", err);
+        err
+    })?;
+
+    let normalized_name = name.trim().to_string();
+    if normalized_name.is_empty() {
+        return Err("setting 名称不能为空".to_string());
+    }
+
+    let parsed_json: serde_json::Value = serde_json::from_str(content.trim())
+        .map_err(|err| format!("setting 文件内容不是合法 JSON: {}", err))?;
+    let pretty_content = serde_json::to_string_pretty(&parsed_json)
+        .map_err(|err| format!("格式化 setting 内容失败: {}", err))?;
+
+    let normalized_id = setting_id.trim().to_string();
+    if normalized_id.is_empty() {
+        return Err("setting_id 不能为空".to_string());
+    }
+
+    if state
+        .config
+        .claude_settings
+        .values()
+        .any(|item| item.id != normalized_id && item.name == normalized_name)
+    {
+        return Err(format!("已存在同名 setting 文件: {}", normalized_name));
+    }
+
+    let previous_setting = state
+        .config
+        .claude_settings
+        .get(&normalized_id)
+        .cloned()
+        .ok_or_else(|| format!("Claude setting 文件不存在: {}", normalized_id))?;
+
+    let updated_setting = {
+        let setting = state
+            .config
+            .claude_settings
+            .get_mut(&normalized_id)
+            .ok_or_else(|| format!("Claude setting 文件不存在: {}", normalized_id))?;
+
+        setting.name = normalized_name;
+        setting.updated_at = Utc::now();
+        setting.clone()
+    };
+
+    if let Err(err) = fs::write(&updated_setting.file_path, pretty_content).await {
+        state
+            .config
+            .claude_settings
+            .insert(normalized_id.clone(), previous_setting.clone());
+        return Err(format!(
+            "写入 setting 文件失败 '{}': {}",
+            updated_setting.file_path, err
+        ));
+    }
+
+    if let Err(err) = state.save_config().await {
+        state
+            .config
+            .claude_settings
+            .insert(normalized_id, previous_setting);
+        log::error!("[update_claude_settings_file] failed to save config: {}", err);
+        return Err(err);
+    }
+
+    Ok(updated_setting)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Delete one Claude setting file, blocked when referenced by projects.
+async fn delete_claude_settings_file(setting_id: String) -> Result<String, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[delete_claude_settings_file] failed to initialize: {}", err);
+        err
+    })?;
+
+    let normalized_id = setting_id.trim().to_string();
+    if normalized_id.is_empty() {
+        return Err("setting_id 不能为空".to_string());
+    }
+
+    let referenced_count = state
+        .config
+        .projects
+        .values()
+        .filter(|project| project.claude_setting_id.as_deref() == Some(normalized_id.as_str()))
+        .count();
+    if referenced_count > 0 {
+        return Err(format!("该 setting 正在被 {} 个项目使用，不能删除", referenced_count));
+    }
+
+    let removed = state
+        .config
+        .claude_settings
+        .remove(&normalized_id)
+        .ok_or_else(|| format!("Claude setting 文件不存在: {}", normalized_id))?;
+
+    if let Err(err) = fs::remove_file(&removed.file_path).await {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            state
+                .config
+                .claude_settings
+                .insert(normalized_id, removed.clone());
+            return Err(format!("删除 setting 文件失败 '{}': {}", removed.file_path, err));
+        }
+    }
+
+    if let Err(err) = state.save_config().await {
+        state
+            .config
+            .claude_settings
+            .insert(removed.id.clone(), removed);
+        log::error!("[delete_claude_settings_file] failed to save config: {}", err);
+        return Err(err);
+    }
+
+    Ok("setting 文件删除成功".to_string())
+}
+
 #[tauri::command(rename_all = "snake_case")]
 /// Update an existing project
-async fn update_project(project_id: String, name: String, description: String, work_directory: String, max_iterations: Option<u32>, completion_promise: Option<String>) -> Result<Project, String> {
+async fn update_project(
+    project_id: String,
+    name: String,
+    description: String,
+    work_directory: String,
+    max_iterations: Option<u32>,
+    completion_promise: Option<String>,
+    last_prompt: Option<String>,
+    claude_setting_id: Option<String>,
+    overwrite_claude_settings: Option<bool>,
+) -> Result<Project, String> {
     let mut state = PROJECT_STATE.lock().await;
     
     // Initialize if not already done
@@ -616,27 +1187,98 @@ async fn update_project(project_id: String, name: String, description: String, w
     })?;
 
     // Validate work directory
-    if !Path::new(&work_directory).exists() {
-        return Err(format!("工作目录不存在: {}", work_directory));
+    let work_dir_path = Path::new(&work_directory);
+    if work_dir_path.exists() {
+        if !work_dir_path.is_dir() {
+            return Err(format!("工作目录路径不是目录: {}", work_directory));
+        }
+    } else {
+        fs::create_dir_all(work_dir_path)
+            .await
+            .map_err(|err| format!("创建工作目录失败 '{}': {}", work_directory, err))?;
     }
 
-    // Get existing project
-    let project = state.config.projects.get_mut(&project_id).ok_or_else(|| {
+    let normalized_claude_setting_update = match claude_setting_id {
+        Some(raw_setting_id) => {
+            let trimmed = raw_setting_id.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                if !state.config.claude_settings.contains_key(trimmed) {
+                    return Err(format!("Claude setting 文件不存在: {}", trimmed));
+                }
+                Some(Some(trimmed.to_string()))
+            }
+        }
+        None => None,
+    };
+
+    // Snapshot previous project for rollback on later failures.
+    let previous_project = state.config.projects.get(&project_id).cloned().ok_or_else(|| {
         format!("项目不存在: {}", project_id)
     })?;
 
     // Update project fields
-    project.name = name;
-    project.description = description;
-    project.work_directory = work_directory;
-    project.updated_at = Utc::now();
-    project.max_iterations = max_iterations;
-    project.completion_promise = completion_promise;
+    let updated_project = {
+        let project = state.config.projects.get_mut(&project_id).ok_or_else(|| {
+            format!("项目不存在: {}", project_id)
+        })?;
 
-    let updated_project = project.clone();
+        project.name = name;
+        project.description = description;
+        project.work_directory = work_directory;
+        project.updated_at = Utc::now();
+        project.max_iterations = max_iterations;
+        project.completion_promise = completion_promise;
+        if let Some(prompt) = last_prompt {
+            let trimmed_prompt = prompt.trim();
+            project.last_prompt = if trimmed_prompt.is_empty() {
+                None
+            } else {
+                Some(prompt)
+            };
+        }
+        if let Some(setting_update) = normalized_claude_setting_update {
+            project.claude_setting_id = setting_update;
+        }
+        if let Some(overwrite) = overwrite_claude_settings {
+            project.overwrite_claude_settings_on_create = overwrite;
+        }
+
+        project.clone()
+    };
+
+    if overwrite_claude_settings.unwrap_or(false) {
+        let setting_id = updated_project
+            .claude_setting_id
+            .as_ref()
+            .ok_or_else(|| "勾选了覆盖 .claude 配置，但项目未绑定 Claude setting 文件".to_string())?;
+        let setting_file = state
+            .config
+            .claude_settings
+            .get(setting_id)
+            .cloned()
+            .ok_or_else(|| format!("Claude setting 文件不存在: {}", setting_id))?;
+        if let Err(err) = apply_claude_setting_to_work_directory(
+            &setting_file.file_path,
+            &updated_project.work_directory,
+        )
+        .await
+        {
+            state
+                .config
+                .projects
+                .insert(project_id.clone(), previous_project.clone());
+            return Err(err);
+        }
+    }
 
     // Save config
     if let Err(e) = state.save_config().await {
+        state
+            .config
+            .projects
+            .insert(project_id.clone(), previous_project.clone());
         log::error!("[update_project] failed to save config: {}", e);
         return Err(e);
     }
@@ -764,11 +1406,17 @@ pub fn run() {
             send_loop_input,
             resize_pty,
             poll_loop_output,
+            inspect_claude_runtime_context,
             get_enabled,
             set_enabled,
             get_runtime_debug_state,
             get_projects,
             create_project,
+            get_claude_settings_files,
+            create_claude_settings_file,
+            get_claude_settings_file_content,
+            update_claude_settings_file,
+            delete_claude_settings_file,
             update_project,
             delete_project,
             set_current_project,

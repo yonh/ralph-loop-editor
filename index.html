@@ -80,7 +80,6 @@
     }
     
     .new-project-btn {
-      width: 100%;
       padding: 10px 16px;
       background: #3b82f6;
       color: white;
@@ -97,6 +96,32 @@
     
     .new-project-btn:hover {
       background: #2563eb;
+    }
+
+    .sidebar-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .sidebar-actions .new-project-btn,
+    .sidebar-actions .manage-setting-btn {
+      flex: 1;
+      width: auto;
+      padding: 10px 8px;
+      font-size: 0.82rem;
+    }
+
+    .manage-setting-btn {
+      background: #0ea5e9;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .manage-setting-btn:hover {
+      background: #0284c7;
     }
     
     .project-list {
@@ -281,22 +306,123 @@
       color: #333;
       font-size: 0.9rem;
     }
-    input[type="text"], textarea {
+    input[type="text"], textarea, select {
       width: 100%;
       padding: 10px 12px;
       border: 1px solid #ddd;
       border-radius: 6px;
       font-size: 0.95rem;
       font-family: inherit;
+      background: #ffffff;
     }
-    input[type="text"]:focus, textarea:focus {
+    input[type="text"]:focus, textarea:focus, select:focus {
       outline: none;
       border-color: #667eea;
       box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
     }
-    input[type="text"]:disabled, textarea:disabled {
+    input[type="text"]:disabled, textarea:disabled, select:disabled {
       background: #f5f5f5;
       cursor: not-allowed;
+    }
+    .checkbox-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      margin-bottom: 0;
+      color: #334155;
+      cursor: pointer;
+    }
+    .checkbox-label input[type="checkbox"] {
+      margin: 0;
+      width: 16px;
+      height: 16px;
+    }
+    .setting-editor {
+      min-height: 160px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.82rem;
+    }
+    .inline-action-btn {
+      margin-top: 8px;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      background: #0ea5e9;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .inline-action-btn:hover {
+      background: #0284c7;
+    }
+    .inline-select-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .inline-select-row select {
+      flex: 1;
+    }
+    .inline-select-row .inline-action-btn {
+      margin-top: 0;
+      min-width: 94px;
+      white-space: nowrap;
+    }
+    .setting-list {
+      max-height: 180px;
+      overflow-y: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 8px;
+      background: #f8fafc;
+    }
+    .setting-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      color: #334155;
+      font-size: 0.85rem;
+      word-break: break-word;
+      cursor: pointer;
+    }
+    .setting-list-item:hover {
+      background: #e2e8f0;
+    }
+    .setting-list-item.active {
+      background: #dbeafe;
+      color: #1e3a8a;
+      font-weight: 600;
+    }
+    .setting-list-name {
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
+    }
+    .setting-list-delete-btn {
+      border: none;
+      border-radius: 6px;
+      background: #ef4444;
+      color: #fff;
+      padding: 4px 8px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .setting-list-delete-btn:hover {
+      background: #dc2626;
+    }
+    .setting-list-item + .setting-list-item {
+      margin-top: 4px;
+    }
+    .setting-list-empty {
+      color: #94a3b8;
+      font-size: 0.85rem;
+      text-align: center;
+      padding: 8px;
     }
     textarea {
       resize: vertical;
@@ -706,7 +832,10 @@
         <div class="current-project">
           当前项目: <span class="current-project-name no-project" id="current-project-name">未选择项目</span>
         </div>
-        <button class="new-project-btn" id="new-project-btn"><i data-lucide="plus"></i> 新建项目</button>
+        <div class="sidebar-actions">
+          <button class="new-project-btn" id="new-project-btn"><i data-lucide="plus"></i> 新建项目</button>
+          <button class="manage-setting-btn" id="manage-claude-settings-btn">Setting 管理</button>
+        </div>
       </div>
       <div class="project-list" id="project-list">
         <!-- Projects will be rendered here -->
@@ -797,11 +926,57 @@
             <input type="text" id="project-work-dir" required placeholder="项目的工作目录路径">
             <div class="hint">Ralph Loop 将在此目录中执行</div>
           </div>
+          <div class="form-group" id="project-claude-setting-group">
+            <label for="project-claude-setting-select">Claude Setting 文件</label>
+            <div class="inline-select-row">
+              <select id="project-claude-setting-select">
+                <option value="">不使用 Claude setting 文件</option>
+              </select>
+              <button type="button" class="inline-action-btn" id="project-open-setting-modal-btn">新建</button>
+            </div>
+            <div class="hint">不同项目可选择不同模型参数配置</div>
+          </div>
+          <div class="form-group" id="project-overwrite-claude-setting-group">
+            <label class="checkbox-label" for="project-overwrite-claude-setting">
+              <input type="checkbox" id="project-overwrite-claude-setting">
+              保存时覆盖工作目录 `.claude/settings.local.json`
+            </label>
+          </div>
         </form>
       </div>
       <div class="modal-footer">
         <button type="button" class="modal-cancel-btn" id="project-cancel-btn">取消</button>
         <button type="submit" class="modal-save-btn" id="project-save-btn">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Claude Settings Modal -->
+  <div class="modal hidden" id="claude-settings-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title">Claude Setting 管理</h2>
+        <button class="modal-close-btn" id="claude-settings-close-btn" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="claude-settings-name">Setting 名称</label>
+          <input type="text" id="claude-settings-name" placeholder="例如: glm-4.7-dev">
+        </div>
+        <div class="form-group">
+          <label for="claude-settings-content">Setting JSON 内容</label>
+          <textarea id="claude-settings-content" class="setting-editor" placeholder="输入 setting JSON 内容"></textarea>
+          <div class="hint">同名保存会提示是否覆盖</div>
+        </div>
+        <div class="form-group">
+          <label>已存在 Setting</label>
+          <div class="setting-list" id="claude-settings-list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" id="claude-settings-cancel-btn">取消</button>
+        <button type="button" class="modal-cancel-btn" id="claude-settings-new-btn">新建模式</button>
+        <button type="button" class="modal-save-btn" id="claude-settings-save-btn">保存 Setting</button>
       </div>
     </div>
   </div>

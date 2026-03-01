@@ -29,6 +29,10 @@ let running = false;
 let outputPollTimer = null;
 let statePollTimer = null;
 let lastBackendStateSignature = '';
+let projectAutoSaveTimer = null;
+let projectAutoSaveInFlight = false;
+let projectAutoSavePending = false;
+const PROJECT_AUTO_SAVE_DELAY_MS = 700;
 
 /**
  * Refresh all Lucide icons on the page
@@ -325,13 +329,124 @@ function syncUI() {
 }
 
 /**
+ * Cancels pending debounced project auto-save timer.
+ */
+function cancelProjectAutoSave() {
+  if (projectAutoSaveTimer) {
+    clearTimeout(projectAutoSaveTimer);
+    projectAutoSaveTimer = null;
+  }
+}
+
+/**
+ * Builds update payload from current right-side form values.
+ */
+function buildProjectFormUpdatePayload(currentProject) {
+  const normalizedWorkDir = workDirInput.value.trim();
+  const promptText = promptInput.value;
+  const normalizedPrompt = promptText.trim();
+  const maxIterationsRaw = maxIterationsInput.value.trim();
+  const parsedIterations = maxIterationsRaw ? parseInt(maxIterationsRaw, 10) : null;
+  const normalizedMaxIterations = Number.isInteger(parsedIterations) && parsedIterations > 0
+    ? parsedIterations
+    : null;
+  const normalizedCompletionPromise = completionPromiseInput.value.trim() || null;
+
+  return {
+    name: currentProject.name,
+    description: currentProject.description,
+    workDirectory: normalizedWorkDir || currentProject.work_directory,
+    maxIterations: normalizedMaxIterations,
+    completionPromise: normalizedCompletionPromise,
+    lastPrompt: normalizedPrompt ? promptText : null,
+  };
+}
+
+/**
+ * Returns whether right-side form values differ from current project state.
+ */
+function hasProjectFormChanges(currentProject, payload) {
+  const currentMaxIterations = currentProject.max_iterations ?? null;
+  const currentCompletionPromise = currentProject.completion_promise ?? null;
+  const currentLastPrompt = currentProject.last_prompt ?? null;
+  return (
+    payload.workDirectory !== currentProject.work_directory ||
+    payload.maxIterations !== currentMaxIterations ||
+    payload.completionPromise !== currentCompletionPromise ||
+    payload.lastPrompt !== currentLastPrompt
+  );
+}
+
+/**
+ * Flushes one project auto-save request immediately.
+ */
+async function flushProjectAutoSave(reason = 'manual-flush', options = {}) {
+  const { force = false } = options;
+  const currentProject = projectManager?.getCurrentProject();
+  if (!currentProject || !projectManager) {
+    return;
+  }
+  if (running && !force) {
+    return;
+  }
+
+  const payload = buildProjectFormUpdatePayload(currentProject);
+  if (!hasProjectFormChanges(currentProject, payload)) {
+    return;
+  }
+
+  if (projectAutoSaveInFlight) {
+    projectAutoSavePending = true;
+    return;
+  }
+
+  projectAutoSaveInFlight = true;
+  try {
+    await projectManager.updateProject(currentProject.id, payload, {
+      reloadProjects: false,
+      silent: true,
+      closeModal: false
+    });
+    appendDebugLog('project auto-saved', { projectId: currentProject.id, reason });
+  } catch (err) {
+    appendDebugLog('project auto-save failed', err);
+  } finally {
+    projectAutoSaveInFlight = false;
+    if (projectAutoSavePending) {
+      projectAutoSavePending = false;
+      queueProjectAutoSave('pending-retry', { force });
+    }
+  }
+}
+
+/**
+ * Debounces project auto-save when right-side form changes.
+ */
+function queueProjectAutoSave(reason = 'input', options = {}) {
+  const { force = false } = options;
+  const currentProject = projectManager?.getCurrentProject();
+  if (!currentProject || !projectManager) {
+    return;
+  }
+  if (running && !force) {
+    return;
+  }
+
+  cancelProjectAutoSave();
+  projectAutoSaveTimer = window.setTimeout(() => {
+    projectAutoSaveTimer = null;
+    void flushProjectAutoSave(reason, { force });
+  }, PROJECT_AUTO_SAVE_DELAY_MS);
+}
+
+/**
  * Sends input to the running loop process.
  */
 async function sendLoopInput(input) {
   try {
     await invokeWithDebug('send_loop_input', {
       input: input,
-      appendNewline: false, // Let terminal handle newlines
+      append_newline: false, // Let terminal handle newlines
     });
   } catch (err) {
     appendDebugLog('send input failed', err);
@@ -365,6 +480,13 @@ function handleProjectRun(project) {
  */
 function handleProjectChange(project) {
   console.log('[handleProjectChange] project changed:', project?.name || 'none');
+  cancelProjectAutoSave();
+  appendDebugLog('project-selected', project ? {
+    id: project.id,
+    name: project.name,
+    work_directory: project.work_directory,
+    claude_setting_id: project.claude_setting_id || null,
+  } : null);
 
   // Update form fields with project data
   if (project) {
@@ -378,25 +500,6 @@ function handleProjectChange(project) {
     promptInput.value = '';
     maxIterationsInput.value = '';
     completionPromiseInput.value = '';
-  }
-
-  // Save current prompt to project when running
-  if (running && project) {
-    const currentPrompt = promptInput.value;
-    if (currentPrompt && currentPrompt !== project.last_prompt) {
-      // Update project with new prompt
-      projectManager.updateProject(project.id, {
-        name: project.name,
-        description: project.description,
-        workDirectory: project.work_directory,
-        maxIterations: project.max_iterations,
-        completionPromise: project.completion_promise
-      }).then(() => {
-        console.log('[handleProjectChange] project prompt updated');
-      }).catch(err => {
-        console.error('[handleProjectChange] failed to update project prompt:', err);
-      });
-    }
   }
 }
 
@@ -492,6 +595,9 @@ async function handleStart() {
     return;
   }
 
+  // Ensure latest right-side edits are persisted before run.
+  await flushProjectAutoSave('before-start', { force: true });
+
   if (terminalComponent && terminalComponent.isInitialized()) {
     terminalComponent.clear();
   } else {
@@ -508,32 +614,33 @@ async function handleStart() {
 
   const workDir = workDirInput.value || currentProject.work_directory;
   const prompt = promptInput.value || null;
-  const maxIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : currentProject.max_iterations;
+  const parsedIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : null;
+  const maxIterations = Number.isInteger(parsedIterations) && parsedIterations > 0
+    ? parsedIterations
+    : currentProject.max_iterations;
   const completionPromise = completionPromiseInput.value || currentProject.completion_promise;
 
-  // Update project with current prompt if it has changed
-  if (prompt && prompt !== currentProject.last_prompt) {
-    try {
-      await projectManager.updateProject(currentProject.id, {
-        name: currentProject.name,
-        description: currentProject.description,
-        workDirectory: currentProject.work_directory,
-        maxIterations: currentProject.max_iterations,
-        completionPromise: currentProject.completion_promise
-      });
-      // Update the prompt in the project
-      currentProject.last_prompt = prompt;
-    } catch (err) {
-      console.error('[handleStart] failed to update project prompt:', err);
-    }
+  appendDebugLog('start-context', {
+    project_id: currentProject.id,
+    project_name: currentProject.name,
+    project_work_directory: currentProject.work_directory,
+    form_work_directory: workDirInput.value || '',
+    effective_work_directory: workDir,
+    project_claude_setting_id: currentProject.claude_setting_id || null,
+  });
+
+  try {
+    await invokeWithDebug('inspect_claude_runtime_context', { work_dir: workDir });
+  } catch (err) {
+    appendDebugLog('inspect_claude_runtime_context failed', err);
   }
 
   try {
     await invokeWithDebug('start_loop', {
-      workDir,
+      work_dir: workDir,
       prompt,
-      maxIterations,
-      completionPromise
+      max_iterations: maxIterations,
+      completion_promise: completionPromise
     });
     await refreshBackendDebugState();
     await pollLoopOutput();
@@ -627,11 +734,19 @@ terminalInput.addEventListener('keydown', (event) => {
     handleSendInput();
   }
 });
+[workDirInput, promptInput, maxIterationsInput, completionPromiseInput].forEach((inputElement) => {
+  if (!inputElement) {
+    return;
+  }
+  inputElement.addEventListener('input', () => queueProjectAutoSave('form-input'));
+  inputElement.addEventListener('change', () => queueProjectAutoSave('form-change'));
+});
 window.addEventListener('error', handleWindowError);
 window.addEventListener('unhandledrejection', handleUnhandledRejection);
 
 // Cleanup on page unload
 window.addEventListener('beforeunload', () => {
+  cancelProjectAutoSave();
   stopPolling();
   if (terminalComponent) {
     terminalComponent.destroy();

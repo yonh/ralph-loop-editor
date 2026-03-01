@@ -5,11 +5,26 @@
 
 import { createIcons, Play, Pause, Edit2, Trash2 } from 'lucide';
 
+const DEFAULT_CLAUDE_SETTING_TEMPLATE = `{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "",
+    "ANTHROPIC_BASE_URL": "",
+    "ANTHROPIC_MODEL": ""
+  },
+  "permissions": {
+    "allow": []
+  },
+  "model": "",
+  "enabledPlugins": {},
+  "skipDangerousModePermissionPrompt": true
+}`;
+
 export class ProjectManager {
   constructor(invokeFunction) {
     this.invoke = invokeFunction;
     this.projects = [];
     this.currentProject = null;
+    this.claudeSettings = [];
     this.globalEnabled = false; // tracks global enabled state
     this.onProjectChange = null;
     this.onProjectsUpdate = null;
@@ -71,9 +86,23 @@ export class ProjectManager {
       deleteProjectName: document.getElementById('delete-project-name'),
       deleteConfirmBtn: document.getElementById('delete-confirm-btn'),
       deleteCancelBtn: document.getElementById('delete-cancel-btn'),
-      deleteCloseBtn: document.getElementById('delete-close-btn')
+      deleteCloseBtn: document.getElementById('delete-close-btn'),
+      projectClaudeSettingSelect: document.getElementById('project-claude-setting-select'),
+      projectOverwriteClaudeSettingsInput: document.getElementById('project-overwrite-claude-setting'),
+      projectOpenSettingModalBtn: document.getElementById('project-open-setting-modal-btn'),
+      manageClaudeSettingsBtn: document.getElementById('manage-claude-settings-btn'),
+      settingsModal: document.getElementById('claude-settings-modal'),
+      settingsModalCloseBtn: document.getElementById('claude-settings-close-btn'),
+      settingsModalCancelBtn: document.getElementById('claude-settings-cancel-btn'),
+      settingsModalNewBtn: document.getElementById('claude-settings-new-btn'),
+      settingsModalSaveBtn: document.getElementById('claude-settings-save-btn'),
+      settingsNameInput: document.getElementById('claude-settings-name'),
+      settingsContentInput: document.getElementById('claude-settings-content'),
+      settingsList: document.getElementById('claude-settings-list')
     };
 
+    this.settingsModalReturnToProject = false;
+    this.editingClaudeSettingId = null;
     console.log('[ProjectManager] DOM elements initialized');
   }
 
@@ -85,7 +114,9 @@ export class ProjectManager {
 
     // New project button
     if (elements.newProjectBtn) {
-      elements.newProjectBtn.addEventListener('click', () => this.showNewProjectModal());
+      elements.newProjectBtn.addEventListener('click', () => {
+        void this.showNewProjectModal();
+      });
     }
 
     // Modal buttons
@@ -107,6 +138,12 @@ export class ProjectManager {
         if (e.target === elements.projectModal) {
           this.hideModal();
         }
+      });
+    }
+
+    if (elements.projectOpenSettingModalBtn) {
+      elements.projectOpenSettingModalBtn.addEventListener('click', () => {
+        this.showClaudeSettingsModal({ returnToProject: true });
       });
     }
 
@@ -142,7 +179,348 @@ export class ProjectManager {
       });
     }
 
+    if (elements.manageClaudeSettingsBtn) {
+      elements.manageClaudeSettingsBtn.addEventListener('click', () => {
+        this.showClaudeSettingsModal({ returnToProject: false });
+      });
+    }
+
+    if (elements.projectClaudeSettingSelect) {
+      elements.projectClaudeSettingSelect.addEventListener('change', () => {
+        this.syncOverwriteCheckboxState();
+      });
+    }
+
+    if (elements.settingsModalSaveBtn) {
+      elements.settingsModalSaveBtn.addEventListener('click', () => {
+        void this.handleSaveClaudeSettingFromModal();
+      });
+    }
+
+    if (elements.settingsModalCancelBtn) {
+      elements.settingsModalCancelBtn.addEventListener('click', () => this.hideClaudeSettingsModal());
+    }
+
+    if (elements.settingsModalNewBtn) {
+      elements.settingsModalNewBtn.addEventListener('click', () => this.resetClaudeSettingsEditor());
+    }
+
+    if (elements.settingsModalCloseBtn) {
+      elements.settingsModalCloseBtn.addEventListener('click', () => this.hideClaudeSettingsModal());
+    }
+
+    if (elements.settingsModal) {
+      elements.settingsModal.addEventListener('click', (e) => {
+        if (e.target === elements.settingsModal) {
+          this.hideClaudeSettingsModal();
+        }
+      });
+    }
+
     console.log('[ProjectManager] event listeners setup complete');
+  }
+
+  /**
+   * Load Claude setting files from backend.
+   */
+  async loadClaudeSettings(selectedSettingId = '', options = {}) {
+    const { refreshProjectList = false } = options;
+    try {
+      this.claudeSettings = await this.invoke('get_claude_settings_files');
+      if (
+        this.editingClaudeSettingId &&
+        !this.claudeSettings.some((setting) => setting.id === this.editingClaudeSettingId)
+      ) {
+        this.editingClaudeSettingId = null;
+        this.syncSettingsModalSaveButtonLabel();
+      }
+      this.renderClaudeSettingOptions(selectedSettingId);
+      this.renderClaudeSettingsList();
+      if (refreshProjectList) {
+        this.renderProjectList();
+      }
+    } catch (error) {
+      console.error('[ProjectManager] failed to load Claude settings:', error);
+      this.showError('加载 Claude setting 文件失败: ' + error);
+    }
+  }
+
+  /**
+   * Render Claude setting options into select element.
+   */
+  renderClaudeSettingOptions(selectedSettingId = '') {
+    const { projectClaudeSettingSelect } = this.elements;
+    if (!projectClaudeSettingSelect) {
+      return;
+    }
+
+    const fallbackSelectedId = selectedSettingId || projectClaudeSettingSelect.value || '';
+    projectClaudeSettingSelect.innerHTML = '';
+
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = '不使用 Claude setting 文件';
+    projectClaudeSettingSelect.appendChild(defaultOption);
+
+    this.claudeSettings.forEach((setting) => {
+      const option = document.createElement('option');
+      option.value = setting.id;
+      option.textContent = setting.name;
+      option.selected = setting.id === fallbackSelectedId;
+      projectClaudeSettingSelect.appendChild(option);
+    });
+
+    this.syncOverwriteCheckboxState();
+  }
+
+  /**
+   * Render setting list in settings modal.
+   */
+  renderClaudeSettingsList() {
+    const { settingsList } = this.elements;
+    if (!settingsList) {
+      return;
+    }
+
+    settingsList.innerHTML = '';
+    if (this.claudeSettings.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'setting-list-empty';
+      empty.textContent = '还没有 setting 文件';
+      settingsList.appendChild(empty);
+      return;
+    }
+
+    this.claudeSettings.forEach((setting) => {
+      const item = document.createElement('div');
+      item.className = 'setting-list-item';
+      if (setting.id === this.editingClaudeSettingId) {
+        item.classList.add('active');
+      }
+
+      const nameElement = document.createElement('div');
+      nameElement.className = 'setting-list-name';
+      nameElement.textContent = setting.name;
+
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'setting-list-delete-btn';
+      deleteButton.textContent = '删除';
+      deleteButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void this.handleDeleteClaudeSetting(setting);
+      });
+
+      item.appendChild(nameElement);
+      item.appendChild(deleteButton);
+      item.addEventListener('click', () => {
+        void this.loadClaudeSettingForEdit(setting.id);
+      });
+      settingsList.appendChild(item);
+    });
+  }
+
+  /**
+   * Resolve setting name from selected id.
+   */
+  getClaudeSettingName(settingId) {
+    if (!settingId) {
+      return '';
+    }
+    const matched = this.claudeSettings.find((setting) => setting.id === settingId);
+    return matched?.name || '';
+  }
+
+  /**
+   * Disable overwrite switch when no setting file is selected.
+   */
+  syncOverwriteCheckboxState() {
+    const { projectClaudeSettingSelect, projectOverwriteClaudeSettingsInput } = this.elements;
+    if (!projectClaudeSettingSelect || !projectOverwriteClaudeSettingsInput) {
+      return;
+    }
+
+    const hasSelectedSetting = Boolean(projectClaudeSettingSelect.value);
+    projectOverwriteClaudeSettingsInput.disabled = !hasSelectedSetting;
+    if (!hasSelectedSetting) {
+      projectOverwriteClaudeSettingsInput.checked = false;
+    }
+  }
+
+  /**
+   * Shows independent Claude settings modal.
+   */
+  showClaudeSettingsModal({ returnToProject = false } = {}) {
+    const { settingsModal } = this.elements;
+    this.settingsModalReturnToProject = returnToProject;
+    this.resetClaudeSettingsEditor();
+    void this.loadClaudeSettings(this.elements.projectClaudeSettingSelect?.value || '');
+    if (settingsModal) {
+      settingsModal.classList.remove('hidden');
+      settingsModal.classList.add('visible');
+    }
+  }
+
+  /**
+   * Hides independent Claude settings modal.
+   */
+  hideClaudeSettingsModal() {
+    const { settingsModal } = this.elements;
+    if (settingsModal) {
+      settingsModal.classList.remove('visible');
+      settingsModal.classList.add('hidden');
+    }
+    this.settingsModalReturnToProject = false;
+  }
+
+  /**
+   * Resets settings editor to create-new mode.
+   */
+  resetClaudeSettingsEditor() {
+    const { settingsNameInput, settingsContentInput } = this.elements;
+    this.editingClaudeSettingId = null;
+    if (settingsNameInput) {
+      settingsNameInput.value = '';
+    }
+    if (settingsContentInput) {
+      settingsContentInput.value = DEFAULT_CLAUDE_SETTING_TEMPLATE;
+    }
+    this.syncSettingsModalSaveButtonLabel();
+    this.renderClaudeSettingsList();
+  }
+
+  /**
+   * Loads one existing setting into editor for update.
+   */
+  async loadClaudeSettingForEdit(settingId) {
+    try {
+      const setting = await this.invoke('get_claude_settings_file_content', { setting_id: settingId });
+      this.editingClaudeSettingId = setting.id;
+      if (this.elements.settingsNameInput) {
+        this.elements.settingsNameInput.value = setting.name || '';
+      }
+      if (this.elements.settingsContentInput) {
+        this.elements.settingsContentInput.value = setting.content || '';
+      }
+      this.syncSettingsModalSaveButtonLabel();
+      this.renderClaudeSettingsList();
+    } catch (error) {
+      console.error('[ProjectManager] failed to load setting for edit:', error);
+      this.showError('加载 setting 文件失败: ' + error);
+    }
+  }
+
+  /**
+   * Deletes one Claude setting after confirmation.
+   */
+  async handleDeleteClaudeSetting(setting) {
+    const shouldDelete = confirm(`确认删除 setting "${setting.name}" 吗？`);
+    if (!shouldDelete) {
+      return;
+    }
+    try {
+      await this.invoke('delete_claude_settings_file', { setting_id: setting.id });
+      const previousSelectedId = this.elements.projectClaudeSettingSelect?.value || '';
+      const nextSelectedId = previousSelectedId === setting.id ? '' : previousSelectedId;
+      await this.loadClaudeSettings(nextSelectedId, { refreshProjectList: true });
+      if (this.editingClaudeSettingId === setting.id) {
+        this.resetClaudeSettingsEditor();
+      }
+      this.showSuccess(`setting 文件 "${setting.name}" 已删除`);
+    } catch (error) {
+      console.error('[ProjectManager] failed to delete setting file:', error);
+      this.showError('删除 setting 文件失败: ' + error);
+    }
+  }
+
+  /**
+   * Create one Claude setting file from settings modal.
+   */
+  async handleSaveClaudeSettingFromModal() {
+    const { settingsNameInput, settingsContentInput, projectClaudeSettingSelect } = this.elements;
+    const name = settingsNameInput?.value?.trim() || '';
+    const content = settingsContentInput?.value?.trim() || '';
+
+    if (!name) {
+      this.showError('setting 名称不能为空');
+      return;
+    }
+    if (!content) {
+      this.showError('setting 文件内容不能为空');
+      return;
+    }
+
+    try {
+      const wasEditing = Boolean(this.editingClaudeSettingId);
+      let setting = null;
+      if (this.editingClaudeSettingId) {
+        setting = await this.invoke('update_claude_settings_file', {
+          setting_id: this.editingClaudeSettingId,
+          name,
+          content
+        });
+      } else {
+        setting = await this.invoke('create_claude_settings_file', {
+          name,
+          content,
+          overwrite: false
+        });
+      }
+
+      await this.loadClaudeSettings(setting.id, { refreshProjectList: true });
+      this.editingClaudeSettingId = setting.id;
+      this.syncSettingsModalSaveButtonLabel();
+      this.renderClaudeSettingsList();
+      if (this.settingsModalReturnToProject && projectClaudeSettingSelect) {
+        projectClaudeSettingSelect.value = setting.id;
+        this.syncOverwriteCheckboxState();
+        this.hideClaudeSettingsModal();
+      }
+      this.showSuccess(wasEditing ? `setting 文件 "${setting.name}" 已保存` : `setting 文件 "${setting.name}" 创建成功`);
+    } catch (error) {
+      const message = String(error || '');
+      if (!this.editingClaudeSettingId && message.includes('已存在同名 setting 文件')) {
+        const shouldOverwrite = confirm(`setting "${name}" 已存在，是否覆盖？`);
+        if (!shouldOverwrite) {
+          return;
+        }
+        try {
+          const setting = await this.invoke('create_claude_settings_file', {
+            name,
+            content,
+            overwrite: true
+          });
+          await this.loadClaudeSettings(setting.id, { refreshProjectList: true });
+          this.editingClaudeSettingId = setting.id;
+          this.syncSettingsModalSaveButtonLabel();
+          this.renderClaudeSettingsList();
+          if (this.settingsModalReturnToProject && projectClaudeSettingSelect) {
+            projectClaudeSettingSelect.value = setting.id;
+            this.syncOverwriteCheckboxState();
+            this.hideClaudeSettingsModal();
+          }
+          this.showSuccess(`setting 文件 "${setting.name}" 已覆盖`);
+        } catch (overwriteError) {
+          console.error('[ProjectManager] failed to overwrite setting file:', overwriteError);
+          this.showError('覆盖 setting 文件失败: ' + overwriteError);
+        }
+        return;
+      }
+
+      console.error('[ProjectManager] failed to create setting file:', error);
+      this.showError('创建 setting 文件失败: ' + error);
+    }
+  }
+
+  /**
+   * Sync save button text according to create/edit mode.
+   */
+  syncSettingsModalSaveButtonLabel() {
+    const { settingsModalSaveBtn } = this.elements;
+    if (!settingsModalSaveBtn) {
+      return;
+    }
+    settingsModalSaveBtn.textContent = this.editingClaudeSettingId ? '更新 Setting' : '保存 Setting';
   }
 
   /**
@@ -193,6 +571,8 @@ export class ProjectManager {
         name: projectData.name,
         description: projectData.description,
         work_directory: projectData.workDirectory,
+        claude_setting_id: projectData.claudeSettingId || null,
+        overwrite_claude_settings: Boolean(projectData.overwriteClaudeSettings),
       });
 
       console.log('[ProjectManager] project created:', project.id);
@@ -211,20 +591,39 @@ export class ProjectManager {
   /**
    * Update an existing project
    */
-  async updateProject(projectId, projectData) {
+  async updateProject(projectId, projectData, options = {}) {
+    const { reloadProjects = true, silent = false, closeModal = true } = options;
     try {
       console.log('[ProjectManager] updating project:', projectId);
-      const project = await this.invoke('update_project', {
+      const payload = {
         project_id: projectId,
         name: projectData.name,
         description: projectData.description,
         work_directory: projectData.workDirectory,
         max_iterations: projectData.maxIterations || null,
         completion_promise: projectData.completionPromise || null,
-      });
+      };
+      if (Object.prototype.hasOwnProperty.call(projectData, 'lastPrompt')) {
+        payload.last_prompt = projectData.lastPrompt;
+      }
+      if (Object.prototype.hasOwnProperty.call(projectData, 'claudeSettingId')) {
+        payload.claude_setting_id = projectData.claudeSettingId;
+      }
+      if (Object.prototype.hasOwnProperty.call(projectData, 'overwriteClaudeSettings')) {
+        payload.overwrite_claude_settings = Boolean(projectData.overwriteClaudeSettings);
+      }
+      const project = await this.invoke('update_project', payload);
 
       console.log('[ProjectManager] project updated:', project.id);
-      await this.loadProjects(); // Reload all projects
+      if (reloadProjects) {
+        await this.loadProjects(); // Reload all projects
+      } else {
+        this.projects = this.projects.map((item) => (item.id === projectId ? project : item));
+        this.renderProjectList();
+        if (this.onProjectsUpdate) {
+          this.onProjectsUpdate(this.projects);
+        }
+      }
 
       // Update current project if it was the one being edited
       if (this.currentProject && this.currentProject.id === projectId) {
@@ -235,13 +634,19 @@ export class ProjectManager {
         }
       }
 
-      this.hideModal();
-      this.showSuccess('项目更新成功');
+      if (closeModal) {
+        this.hideModal();
+      }
+      if (!silent) {
+        this.showSuccess('项目更新成功');
+      }
 
       return project;
     } catch (error) {
       console.error('[ProjectManager] failed to update project:', error);
-      this.showError('更新项目失败: ' + error);
+      if (!silent) {
+        this.showError('更新项目失败: ' + error);
+      }
       throw error;
     }
   }
@@ -376,6 +781,7 @@ export class ProjectManager {
           <div class="project-name">${escapeHtml(project.name)}</div>
           <div class="project-description">${escapeHtml(project.description)}</div>
           <div class="project-work-dir">${escapeHtml(project.work_directory)}</div>
+          ${project.claude_setting_id ? `<div class="project-work-dir">Setting: ${escapeHtml(this.getClaudeSettingName(project.claude_setting_id) || project.claude_setting_id)}</div>` : ''}
         </div>
         <div class="project-toggle-wrap${isEnabled ? ' active' : ''}">
           <span class="project-toggle-label">${isEnabled ? '启用' : '禁用'}</span>
@@ -427,7 +833,7 @@ export class ProjectManager {
     if (editBtn) {
       editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        this.showEditProjectModal(project);
+        void this.showEditProjectModal(project);
       });
     }
 
@@ -527,7 +933,7 @@ export class ProjectManager {
   /**
    * Show modal for new project
    */
-  showNewProjectModal() {
+  async showNewProjectModal() {
     const { elements } = this;
 
     if (elements.modalTitle) {
@@ -550,6 +956,16 @@ export class ProjectManager {
       elements.projectWorkDirInput.value = '';
     }
 
+    if (elements.projectClaudeSettingSelect) {
+      elements.projectClaudeSettingSelect.value = '';
+    }
+
+    if (elements.projectOverwriteClaudeSettingsInput) {
+      elements.projectOverwriteClaudeSettingsInput.checked = false;
+    }
+
+    await this.loadClaudeSettings('');
+
     this.editingProject = null;
     this.showModal();
   }
@@ -557,7 +973,7 @@ export class ProjectManager {
   /**
    * Show modal for editing project
    */
-  showEditProjectModal(project) {
+  async showEditProjectModal(project) {
     const { elements } = this;
 
     if (elements.modalTitle) {
@@ -576,6 +992,11 @@ export class ProjectManager {
       elements.projectWorkDirInput.value = project.work_directory;
     }
 
+    await this.loadClaudeSettings(project.claude_setting_id || '');
+    if (elements.projectOverwriteClaudeSettingsInput) {
+      elements.projectOverwriteClaudeSettingsInput.checked = false;
+    }
+
     this.editingProject = project;
     this.showModal();
   }
@@ -589,7 +1010,9 @@ export class ProjectManager {
     const projectData = {
       name: elements.projectNameInput?.value || '',
       description: elements.projectDescriptionInput?.value || '',
-      workDirectory: elements.projectWorkDirInput?.value || ''
+      workDirectory: elements.projectWorkDirInput?.value || '',
+      claudeSettingId: elements.projectClaudeSettingSelect?.value || '',
+      overwriteClaudeSettings: Boolean(elements.projectOverwriteClaudeSettingsInput?.checked)
     };
 
     // Basic validation
@@ -603,10 +1026,16 @@ export class ProjectManager {
       return;
     }
 
+    if (projectData.overwriteClaudeSettings && !projectData.claudeSettingId) {
+      this.showError('勾选覆盖 .claude 配置时必须先选择 Claude setting 文件');
+      return;
+    }
+
     try {
       if (this.editingProject) {
         await this.updateProject(this.editingProject.id, projectData);
       } else {
+        projectData.claudeSettingId = projectData.claudeSettingId || null;
         await this.createProject(projectData);
       }
     } catch (error) {
@@ -756,6 +1185,7 @@ export class ProjectManager {
 
     this.initializeElements();
     this.setupEventListeners();
+    await this.loadClaudeSettings();
 
     await this.loadProjects();
     await this.loadCurrentProject();
