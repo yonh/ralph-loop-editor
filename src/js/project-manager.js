@@ -25,11 +25,10 @@ export class ProjectManager {
     this.projects = [];
     this.currentProject = null;
     this.claudeSettings = [];
-    this.globalEnabled = false; // tracks global enabled state
     this.onProjectChange = null;
     this.onProjectsUpdate = null;
     this.onProjectRun = null;
-    this.onProjectToggle = null; // callback(newEnabled)
+    this.onProjectToggle = null; // callback(projectId, newEnabled)
     this.pendingDeleteProject = null;
     this.isDeletingProject = false;
 
@@ -78,6 +77,7 @@ export class ProjectManager {
       projectNameInput: document.getElementById('project-name'),
       projectDescriptionInput: document.getElementById('project-description'),
       projectWorkDirInput: document.getElementById('project-work-dir'),
+      projectEnabledInput: document.getElementById('project-enabled'),
       projectSaveBtn: document.getElementById('project-save-btn'),
       projectCancelBtn: document.getElementById('project-cancel-btn'),
       modalCloseBtn: document.getElementById('modal-close-btn'),
@@ -573,6 +573,7 @@ export class ProjectManager {
         work_directory: projectData.workDirectory,
         claude_setting_id: projectData.claudeSettingId || null,
         overwrite_claude_settings: Boolean(projectData.overwriteClaudeSettings),
+        enabled: Boolean(projectData.enabled),
       });
 
       console.log('[ProjectManager] project created:', project.id);
@@ -611,6 +612,9 @@ export class ProjectManager {
       }
       if (Object.prototype.hasOwnProperty.call(projectData, 'overwriteClaudeSettings')) {
         payload.overwrite_claude_settings = Boolean(projectData.overwriteClaudeSettings);
+      }
+      if (Object.prototype.hasOwnProperty.call(projectData, 'enabled')) {
+        payload.enabled = Boolean(projectData.enabled);
       }
       const project = await this.invoke('update_project', payload);
 
@@ -727,9 +731,11 @@ export class ProjectManager {
       }
 
       console.log('[ProjectManager] current project set:', project.name);
+      return project;
     } catch (error) {
       console.error('[ProjectManager] failed to set current project:', error);
       this.showError('设置当前项目失败: ' + error);
+      return null;
     }
   }
 
@@ -772,13 +778,19 @@ export class ProjectManager {
       return div.innerHTML;
     };
 
-    const isEnabled = this.globalEnabled;
+    const isEnabled = Boolean(project.enabled);
     const toggleId = `toggle-${project.id}`;
+    const enabledBadge = isEnabled
+      ? '<span class="project-enabled-badge enabled">已启用</span>'
+      : '<span class="project-enabled-badge disabled">未启用</span>';
 
     div.innerHTML = `
       <div class="project-header">
         <div class="project-info">
-          <div class="project-name">${escapeHtml(project.name)}</div>
+          <div class="project-name-row">
+            <div class="project-name">${escapeHtml(project.name)}</div>
+            ${enabledBadge}
+          </div>
           <div class="project-description">${escapeHtml(project.description)}</div>
           <div class="project-work-dir">${escapeHtml(project.work_directory)}</div>
           ${project.claude_setting_id ? `<div class="project-work-dir">Setting: ${escapeHtml(this.getClaudeSettingName(project.claude_setting_id) || project.claude_setting_id)}</div>` : ''}
@@ -816,9 +828,9 @@ export class ProjectManager {
       toggleInput.addEventListener('change', (e) => {
         e.stopPropagation();
         const newEnabled = e.target.checked;
-        // Notify callback (main.js will call set_enabled and sync all switches)
+        // Notify callback (main.js will persist one project's enabled state)
         if (this.onProjectToggle) {
-          this.onProjectToggle(newEnabled);
+          this.onProjectToggle(project.id, newEnabled);
         }
       });
     }
@@ -861,14 +873,17 @@ export class ProjectManager {
     console.log('[ProjectManager] running project:', project.name);
 
     // Set as current project first
-    this.setCurrentProject(project.id).then(() => {
+    this.setCurrentProject(project.id).then((selectedProject) => {
+      if (!selectedProject) {
+        return;
+      }
       // Trigger run callback
       if (this.onProjectRun) {
-        this.onProjectRun(project);
+        this.onProjectRun(selectedProject);
       }
 
       // The actual start will be handled by the main application
-      this.showSuccess(`项目 "${project.name}" 已设置为当前项目，可以开始运行`);
+      this.showSuccess(`项目 "${selectedProject.name}" 已设置为当前项目，可以开始运行`);
     });
   }
 
@@ -910,24 +925,39 @@ export class ProjectManager {
   }
 
   /**
-   * Sync all project card toggle switches to the given global enabled state
-   */
-  syncToggleStates(isEnabled) {
-    this.globalEnabled = isEnabled;
-    document.querySelectorAll('.project-toggle-wrap').forEach(wrap => {
-      const input = wrap.querySelector('input[type="checkbox"]');
-      const label = wrap.querySelector('.project-toggle-label');
-      if (input) input.checked = isEnabled;
-      if (label) label.textContent = isEnabled ? '启用' : '禁用';
-      wrap.classList.toggle('active', isEnabled);
-    });
-  }
-
-  /**
-   * Update toggle switch display for a project (legacy - now uses syncToggleStates)
+   * Update toggle switch display for one project and sync local cache.
    */
   updateProjectEnabledState(projectId, isEnabled) {
-    this.syncToggleStates(isEnabled);
+    const normalized = Boolean(isEnabled);
+    this.projects = this.projects.map((project) => (
+      project.id === projectId ? { ...project, enabled: normalized } : project
+    ));
+
+    if (this.currentProject && this.currentProject.id === projectId) {
+      this.currentProject = { ...this.currentProject, enabled: normalized };
+    }
+
+    const projectElements = document.querySelectorAll(`[data-project-id="${projectId}"]`);
+    projectElements.forEach((element) => {
+      const toggleWrap = element.querySelector('.project-toggle-wrap');
+      const toggleInput = element.querySelector('input[type="checkbox"]');
+      const toggleLabel = element.querySelector('.project-toggle-label');
+      const enabledBadge = element.querySelector('.project-enabled-badge');
+      if (toggleInput) {
+        toggleInput.checked = normalized;
+      }
+      if (toggleLabel) {
+        toggleLabel.textContent = normalized ? '启用' : '禁用';
+      }
+      if (enabledBadge) {
+        enabledBadge.textContent = normalized ? '已启用' : '未启用';
+        enabledBadge.classList.toggle('enabled', normalized);
+        enabledBadge.classList.toggle('disabled', !normalized);
+      }
+      if (toggleWrap) {
+        toggleWrap.classList.toggle('active', normalized);
+      }
+    });
   }
 
   /**
@@ -963,6 +993,9 @@ export class ProjectManager {
     if (elements.projectOverwriteClaudeSettingsInput) {
       elements.projectOverwriteClaudeSettingsInput.checked = false;
     }
+    if (elements.projectEnabledInput) {
+      elements.projectEnabledInput.checked = false;
+    }
 
     await this.loadClaudeSettings('');
 
@@ -996,6 +1029,9 @@ export class ProjectManager {
     if (elements.projectOverwriteClaudeSettingsInput) {
       elements.projectOverwriteClaudeSettingsInput.checked = false;
     }
+    if (elements.projectEnabledInput) {
+      elements.projectEnabledInput.checked = Boolean(project.enabled);
+    }
 
     this.editingProject = project;
     this.showModal();
@@ -1012,7 +1048,8 @@ export class ProjectManager {
       description: elements.projectDescriptionInput?.value || '',
       workDirectory: elements.projectWorkDirInput?.value || '',
       claudeSettingId: elements.projectClaudeSettingSelect?.value || '',
-      overwriteClaudeSettings: Boolean(elements.projectOverwriteClaudeSettingsInput?.checked)
+      overwriteClaudeSettings: Boolean(elements.projectOverwriteClaudeSettingsInput?.checked),
+      enabled: Boolean(elements.projectEnabledInput?.checked)
     };
 
     // Basic validation

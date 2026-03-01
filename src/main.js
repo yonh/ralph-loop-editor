@@ -24,7 +24,7 @@ const icons = {
 let invoke = null;
 let terminalComponent = null;
 let projectManager = null;
-let enabled = false;
+let currentProjectEnabled = false;
 let running = false;
 let outputPollTimer = null;
 let statePollTimer = null;
@@ -226,8 +226,13 @@ async function refreshBackendDebugState() {
   try {
     const state = await invokeWithDebug('get_runtime_debug_state');
     const previousRunning = running;
-    enabled = Boolean(state.enabled);
+    const hasCurrentProjectEnabled = state.current_project_enabled !== null && state.current_project_enabled !== undefined;
+    currentProjectEnabled = hasCurrentProjectEnabled ? Boolean(state.current_project_enabled) : false;
     running = Boolean(state.loop_running);
+
+    if (projectManager && state.current_project_id && hasCurrentProjectEnabled) {
+      projectManager.updateProjectEnabledState(state.current_project_id, currentProjectEnabled);
+    }
 
     const stateSignature = JSON.stringify(state);
     if (stateSignature !== lastBackendStateSignature) {
@@ -297,9 +302,12 @@ function stopPolling() {
  * Synchronizes the visual state with the in-memory state flags.
  */
 function syncUI() {
-  toggleBtn.innerHTML = `<i data-lucide="${enabled ? 'toggle-right' : 'toggle-left'}"></i> ${enabled ? 'Disable' : 'Enable'}`;
-  startBtn.disabled = !enabled || running;
-  stopBtn.disabled = !enabled || !running;
+  const currentProject = projectManager?.getCurrentProject() || null;
+  const hasCurrentProject = Boolean(currentProject);
+  toggleBtn.disabled = !hasCurrentProject || running;
+  toggleBtn.innerHTML = `<i data-lucide="${currentProjectEnabled ? 'toggle-right' : 'toggle-left'}"></i> ${currentProjectEnabled ? 'Disable Project' : 'Enable Project'}`;
+  startBtn.disabled = !hasCurrentProject || !currentProjectEnabled || running;
+  stopBtn.disabled = !running;
   sendBtn.disabled = !running;
   terminalInput.disabled = !running;
   statusDiv.className = 'status';
@@ -307,12 +315,15 @@ function syncUI() {
   if (running) {
     statusDiv.classList.add('running');
     statusDiv.textContent = 'Status: Running';
-  } else if (enabled) {
+  } else if (!hasCurrentProject) {
+    statusDiv.classList.add('disabled');
+    statusDiv.textContent = 'Status: No Project Selected';
+  } else if (currentProjectEnabled) {
     statusDiv.classList.add('enabled');
-    statusDiv.textContent = 'Status: Enabled';
+    statusDiv.textContent = 'Status: Project Enabled';
   } else {
     statusDiv.classList.add('disabled');
-    statusDiv.textContent = 'Status: Disabled';
+    statusDiv.textContent = 'Status: Project Disabled';
   }
 
   // Refresh icons for modified buttons
@@ -323,8 +334,6 @@ function syncUI() {
     const currentProject = projectManager.getCurrentProject();
     const runningProjectId = running && currentProject ? currentProject.id : null;
     projectManager.updateAllProjectsRunningState(runningProjectId);
-    // Sync all project card toggle switches to the current global enabled state
-    projectManager.syncToggleStates(enabled);
   }
 }
 
@@ -461,16 +470,17 @@ function handleProjectRun(project) {
 
   // Update form with project data
   handleProjectChange(project);
+  const projectEnabledAtSelection = Boolean(project.enabled);
 
   // Start the loop if enabled
-  if (enabled) {
+  if (projectEnabledAtSelection) {
     handleStart();
   } else {
     // Enable first, then start
-    handleToggle().then(() => {
-      setTimeout(handleStart, 500);
-    }).catch(err => {
-      console.error('[handleProjectRun] failed to enable:', err);
+    handleToggle().then((success) => {
+      if (success) {
+        setTimeout(handleStart, 500);
+      }
     });
   }
 }
@@ -486,21 +496,26 @@ function handleProjectChange(project) {
     name: project.name,
     work_directory: project.work_directory,
     claude_setting_id: project.claude_setting_id || null,
+    enabled: Boolean(project.enabled),
   } : null);
 
   // Update form fields with project data
   if (project) {
+    currentProjectEnabled = Boolean(project.enabled);
     workDirInput.value = project.work_directory || '';
     promptInput.value = project.last_prompt || '';
     maxIterationsInput.value = project.max_iterations?.toString() || '';
     completionPromiseInput.value = project.completion_promise || '';
   } else {
+    currentProjectEnabled = false;
     // Clear form when no project selected
     workDirInput.value = '';
     promptInput.value = '';
     maxIterationsInput.value = '';
     completionPromiseInput.value = '';
   }
+
+  syncUI();
 }
 
 /**
@@ -514,24 +529,34 @@ function handleProjectsUpdate(projects) {
 /**
  * Handles project toggle (enable/disable from project card switch)
  */
-async function handleProjectToggle(newEnabled) {
-  console.log('[handleProjectToggle] toggling enabled:', newEnabled);
+async function handleProjectToggle(projectId, newEnabled) {
+  console.log('[handleProjectToggle] toggling project enabled:', projectId, newEnabled);
   try {
-    enabled = await invokeWithDebug('set_enabled', { enabled: newEnabled });
+    const updatedProject = await invokeWithDebug('set_project_enabled', {
+      project_id: projectId,
+      enabled: newEnabled
+    });
+    if (projectManager) {
+      projectManager.updateProjectEnabledState(projectId, updatedProject.enabled);
+      const currentProject = projectManager.getCurrentProject();
+      if (currentProject && currentProject.id === projectId) {
+        currentProjectEnabled = Boolean(updatedProject.enabled);
+      }
+    }
     syncUI();
     await refreshBackendDebugState();
   } catch (err) {
     appendDebugLog('project toggle failed', err);
     // Revert the toggle UI on failure
     if (projectManager) {
-      projectManager.syncToggleStates(!newEnabled);
+      projectManager.updateProjectEnabledState(projectId, !newEnabled);
     }
     alert(`切换项目状态失败: ${serializeDebugValue(err)}`);
   }
 }
 
 /**
- * Initializes runtime binding and initial enabled state.
+ * Initializes runtime binding and initial project state.
  */
 async function init() {
   refreshPageIcons();
@@ -551,7 +576,7 @@ async function init() {
     await projectManager.initialize();
     appendDebugLog('project manager initialized');
 
-    enabled = await invokeWithDebug('get_enabled');
+    currentProjectEnabled = Boolean(projectManager.getCurrentProject()?.enabled);
     syncUI();
 
     // Initial icon render
@@ -570,15 +595,35 @@ async function init() {
  * Handles enable/disable button clicks.
  */
 async function handleToggle() {
-  appendDebugLog('toggle button clicked', { enabled, running });
+  const currentProject = projectManager?.getCurrentProject();
+  appendDebugLog('toggle button clicked', {
+    current_project_id: currentProject?.id || null,
+    current_project_enabled: currentProjectEnabled,
+    running
+  });
+
+  if (!currentProject) {
+    alert('请先选择一个项目');
+    return false;
+  }
+
   try {
-    const newEnabled = !enabled;
-    enabled = await invokeWithDebug('set_enabled', { enabled: newEnabled });
+    const newEnabled = !currentProjectEnabled;
+    const updatedProject = await invokeWithDebug('set_project_enabled', {
+      project_id: currentProject.id,
+      enabled: newEnabled
+    });
+    currentProjectEnabled = Boolean(updatedProject.enabled);
+    if (projectManager) {
+      projectManager.updateProjectEnabledState(updatedProject.id, updatedProject.enabled);
+    }
     syncUI();
     await refreshBackendDebugState();
+    return true;
   } catch (err) {
     appendDebugLog('toggle failed', err);
     alert(`Toggle failed: ${serializeDebugValue(err)}`);
+    return false;
   }
 }
 
@@ -586,12 +631,16 @@ async function handleToggle() {
  * Handles start button clicks.
  */
 async function handleStart() {
-  appendDebugLog('start button clicked', { enabled, running });
+  appendDebugLog('start button clicked', { currentProjectEnabled, running });
 
   // Check if there's a current project
   const currentProject = projectManager?.getCurrentProject();
   if (!currentProject) {
     alert('请先选择一个项目');
+    return;
+  }
+  if (!currentProjectEnabled) {
+    alert('当前项目未启用，请先启用当前项目');
     return;
   }
 
@@ -665,7 +714,7 @@ async function handleStart() {
  * Handles stop button clicks.
  */
 async function handleStop() {
-  appendDebugLog('stop button clicked', { enabled, running });
+  appendDebugLog('stop button clicked', { currentProjectEnabled, running });
   running = false;
   syncUI();
   workDirInput.disabled = false;

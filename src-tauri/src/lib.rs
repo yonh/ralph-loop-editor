@@ -22,7 +22,6 @@ struct LoopSession {
 }
 
 static LOOP_STATE: Mutex<Option<LoopSession>> = Mutex::new(None);
-static ENABLED_STATE: Mutex<bool> = Mutex::new(false);
 static OUTPUT_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 static PROJECT_STATE: LazyLock<AsyncMutex<ProjectState>> = LazyLock::new(|| AsyncMutex::new(ProjectState::new()));
 
@@ -50,6 +49,8 @@ pub struct Project {
     pub max_iterations: Option<u32>,
     pub completion_promise: Option<String>,
     pub claude_setting_id: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default)]
     pub overwrite_claude_settings_on_create: bool,
 }
@@ -344,7 +345,8 @@ async fn apply_claude_setting_to_work_directory(setting_file_path: &str, work_di
 #[derive(serde::Serialize)]
 /// Snapshot of backend runtime state for diagnostics.
 struct RuntimeDebugState {
-    enabled: bool,
+    current_project_id: Option<String>,
+    current_project_enabled: Option<bool>,
     loop_running: bool,
     loop_pid: Option<u32>,
 }
@@ -465,53 +467,88 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
     });
 }
 
-#[tauri::command]
-/// Returns whether the app is enabled.
-fn get_enabled() -> Result<bool, String> {
-    match ENABLED_STATE.lock() {
-        Ok(state) => {
-            let value = *state;
-            log::info!("[get_enabled] returning enabled={}", value);
-            Ok(value)
-        }
-        Err(err) => {
-            log::error!("[get_enabled] failed to lock ENABLED_STATE: {}", err);
-            Err(format!("Failed to read enabled state: {}", err))
-        }
-    }
+#[tauri::command(rename_all = "snake_case")]
+/// Returns whether one project is enabled.
+async fn get_project_enabled(project_id: String) -> Result<bool, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[get_project_enabled] failed to initialize: {}", err);
+        err
+    })?;
+
+    let project = state
+        .config
+        .projects
+        .get(project_id.trim())
+        .ok_or_else(|| format!("项目不存在: {}", project_id))?;
+    Ok(project.enabled)
 }
 
-#[tauri::command]
-/// Updates and returns the enabled flag.
-fn set_enabled(enabled: bool) -> Result<bool, String> {
-    match ENABLED_STATE.lock() {
-        Ok(mut state) => {
-            let previous = *state;
-            *state = enabled;
-            log::info!(
-                "[set_enabled] changed enabled from {} to {}",
-                previous,
-                enabled
-            );
-            Ok(enabled)
-        }
-        Err(err) => {
-            log::error!("[set_enabled] failed to lock ENABLED_STATE: {}", err);
-            Err(format!("Failed to update enabled state: {}", err))
-        }
+#[tauri::command(rename_all = "snake_case")]
+/// Sets one project's enabled flag and returns the updated project.
+async fn set_project_enabled(project_id: String, enabled: bool) -> Result<Project, String> {
+    let mut state = PROJECT_STATE.lock().await;
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[set_project_enabled] failed to initialize: {}", err);
+        err
+    })?;
+
+    let project_id = project_id.trim().to_string();
+    if project_id.is_empty() {
+        return Err("project_id 不能为空".to_string());
     }
+
+    let previous_project = state
+        .config
+        .projects
+        .get(&project_id)
+        .cloned()
+        .ok_or_else(|| format!("项目不存在: {}", project_id))?;
+
+    let updated_project = {
+        let project = state
+            .config
+            .projects
+            .get_mut(&project_id)
+            .ok_or_else(|| format!("项目不存在: {}", project_id))?;
+        project.enabled = enabled;
+        project.updated_at = Utc::now();
+        project.clone()
+    };
+
+    if let Err(err) = state.save_config().await {
+        state
+            .config
+            .projects
+            .insert(project_id.clone(), previous_project);
+        log::error!(
+            "[set_project_enabled] failed to save config for project {}: {}",
+            project_id,
+            err
+        );
+        return Err(err);
+    }
+
+    Ok(updated_project)
 }
 
 #[tauri::command]
 /// Returns a backend state snapshot to help diagnose UI/command issues.
-fn get_runtime_debug_state() -> Result<RuntimeDebugState, String> {
-    let enabled = ENABLED_STATE.lock().map_err(|err| {
-        log::error!(
-            "[get_runtime_debug_state] failed to lock ENABLED_STATE: {}",
+async fn get_runtime_debug_state() -> Result<RuntimeDebugState, String> {
+    let (current_project_id, current_project_enabled) = {
+        let mut project_state = PROJECT_STATE.lock().await;
+        project_state.ensure_initialized().await.map_err(|err| {
+            log::error!("[get_runtime_debug_state] failed to initialize: {}", err);
             err
-        );
-        format!("Failed to read enabled state: {}", err)
-    })?;
+        })?;
+
+        let current_project_id = project_state.config.current_project_id.clone();
+        let current_project_enabled = current_project_id
+            .as_ref()
+            .and_then(|project_id| project_state.config.projects.get(project_id))
+            .map(|project| project.enabled);
+        (current_project_id, current_project_enabled)
+    };
 
     let loop_state = LOOP_STATE.lock().map_err(|err| {
         log::error!(
@@ -522,7 +559,8 @@ fn get_runtime_debug_state() -> Result<RuntimeDebugState, String> {
     })?;
 
     Ok(RuntimeDebugState {
-        enabled: *enabled,
+        current_project_id,
+        current_project_enabled,
         loop_running: loop_state.is_some(),
         loop_pid: loop_state.as_ref().and_then(|session| session.pid),
     })
@@ -661,7 +699,12 @@ fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
 
 #[tauri::command(rename_all = "snake_case")]
 /// Starts the loop process in the optional working directory.
-fn start_loop(work_dir: Option<String>, prompt: Option<String>, max_iterations: Option<u32>, completion_promise: Option<String>) -> Result<String, String> {
+async fn start_loop(
+    work_dir: Option<String>,
+    prompt: Option<String>,
+    max_iterations: Option<u32>,
+    completion_promise: Option<String>,
+) -> Result<String, String> {
     log::info!(
         "[start_loop] called with work_dir={:?}, prompt_provided={}, max_iterations={:?}, completion_promise={:?}",
         work_dir,
@@ -670,14 +713,34 @@ fn start_loop(work_dir: Option<String>, prompt: Option<String>, max_iterations: 
         completion_promise
     );
 
-    let enabled = ENABLED_STATE.lock().map_err(|err| {
-        log::error!("[start_loop] failed to lock ENABLED_STATE: {}", err);
-        format!("Failed to read enabled state: {}", err)
-    })?;
+    let current_project = {
+        let mut project_state = PROJECT_STATE.lock().await;
+        project_state.ensure_initialized().await.map_err(|err| {
+            log::error!("[start_loop] failed to initialize project config: {}", err);
+            err
+        })?;
 
-    if !*enabled {
-        log::warn!("[start_loop] blocked because app is disabled");
-        return Err("应用未启用，请先点击启用按钮".to_string());
+        let current_project_id = project_state
+            .config
+            .current_project_id
+            .clone()
+            .ok_or_else(|| "请先选择一个项目".to_string())?;
+
+        project_state
+            .config
+            .projects
+            .get(&current_project_id)
+            .cloned()
+            .ok_or_else(|| format!("当前项目不存在: {}", current_project_id))?
+    };
+
+    if !current_project.enabled {
+        log::warn!(
+            "[start_loop] blocked because current project is disabled: {} ({})",
+            current_project.name,
+            current_project.id
+        );
+        return Err("当前项目未启用，请先在项目卡片或主控区启用该项目".to_string());
     }
 
     let mut state = LOOP_STATE.lock().map_err(|err| {
@@ -714,12 +777,16 @@ fn start_loop(work_dir: Option<String>, prompt: Option<String>, max_iterations: 
     command.arg("--dangerously-skip-permissions");
     command.arg(command_payload);
 
-    if let Some(dir) = work_dir {
-        if !Path::new(&dir).exists() {
-            return Err(format!("工作目录不存在: {}", dir));
-        }
-        command.cwd(dir);
+    let resolved_work_dir = work_dir
+        .as_ref()
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| current_project.work_directory.clone());
+
+    if !Path::new(&resolved_work_dir).exists() {
+        return Err(format!("工作目录不存在: {}", resolved_work_dir));
     }
+    command.cwd(&resolved_work_dir);
 
     let pty_system = native_pty_system();
     let pty_pair = pty_system
@@ -820,6 +887,7 @@ async fn create_project(
     work_directory: String,
     claude_setting_id: Option<String>,
     overwrite_claude_settings: Option<bool>,
+    enabled: Option<bool>,
 ) -> Result<Project, String> {
     let mut state = PROJECT_STATE.lock().await;
     
@@ -883,6 +951,7 @@ async fn create_project(
         max_iterations: None,
         completion_promise: None,
         claude_setting_id: resolved_claude_setting_id,
+        enabled: enabled.unwrap_or(false),
         overwrite_claude_settings_on_create: should_overwrite_claude_settings,
     };
 
@@ -1177,6 +1246,7 @@ async fn update_project(
     last_prompt: Option<String>,
     claude_setting_id: Option<String>,
     overwrite_claude_settings: Option<bool>,
+    enabled: Option<bool>,
 ) -> Result<Project, String> {
     let mut state = PROJECT_STATE.lock().await;
     
@@ -1243,6 +1313,9 @@ async fn update_project(
         }
         if let Some(overwrite) = overwrite_claude_settings {
             project.overwrite_claude_settings_on_create = overwrite;
+        }
+        if let Some(project_enabled) = enabled {
+            project.enabled = project_enabled;
         }
 
         project.clone()
@@ -1407,8 +1480,8 @@ pub fn run() {
             resize_pty,
             poll_loop_output,
             inspect_claude_runtime_context,
-            get_enabled,
-            set_enabled,
+            get_project_enabled,
+            set_project_enabled,
             get_runtime_debug_state,
             get_projects,
             create_project,
@@ -1441,4 +1514,53 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_enabled_defaults_to_false_when_missing_in_json() {
+        let raw = r#"
+        {
+          "id": "p1",
+          "name": "demo",
+          "description": "desc",
+          "work_directory": "/tmp/demo",
+          "created_at": "2024-01-01T00:00:00Z",
+          "updated_at": "2024-01-01T00:00:00Z",
+          "last_prompt": null,
+          "max_iterations": null,
+          "completion_promise": null,
+          "claude_setting_id": null
+        }
+        "#;
+
+        let project: Project = serde_json::from_str(raw).expect("project json should parse");
+        assert!(!project.enabled);
+        assert!(!project.overwrite_claude_settings_on_create);
+    }
+
+    #[test]
+    fn project_enabled_uses_explicit_value_from_json() {
+        let raw = r#"
+        {
+          "id": "p2",
+          "name": "demo2",
+          "description": "desc",
+          "work_directory": "/tmp/demo2",
+          "created_at": "2024-01-01T00:00:00Z",
+          "updated_at": "2024-01-01T00:00:00Z",
+          "last_prompt": null,
+          "max_iterations": null,
+          "completion_promise": null,
+          "claude_setting_id": null,
+          "enabled": true
+        }
+        "#;
+
+        let project: Project = serde_json::from_str(raw).expect("project json should parse");
+        assert!(project.enabled);
+    }
 }

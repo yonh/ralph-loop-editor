@@ -160,6 +160,37 @@
       font-size: 1rem;
       margin-bottom: 4px;
     }
+
+    .project-name-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .project-enabled-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      line-height: 1.3;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .project-enabled-badge.enabled {
+      color: #166534;
+      background: #dcfce7;
+      border: 1px solid #86efac;
+    }
+
+    .project-enabled-badge.disabled {
+      color: #991b1b;
+      background: #fee2e2;
+      border: 1px solid #fca5a5;
+    }
     
     .project-description {
       color: #64748b;
@@ -844,7 +875,7 @@
 
     <!-- Main Content -->
     <div class="main-content">
-      <div class="status disabled" id="status">Status: Disabled</div>
+      <div class="status disabled" id="status">Status: No Project Selected</div>
 
     <div class="form-group">
       <label for="work-dir">Working Directory</label>
@@ -873,7 +904,7 @@
     <div class="divider"></div>
 
     <div class="controls">
-      <button id="toggle-btn"><i data-lucide="toggle-left"></i> Enable</button>
+      <button id="toggle-btn"><i data-lucide="toggle-left"></i> Enable Project</button>
       <button id="start-btn" disabled><i data-lucide="play"></i> Start</button>
       <button id="stop-btn" disabled><i data-lucide="square"></i> Stop</button>
     </div>
@@ -940,6 +971,12 @@
             <label class="checkbox-label" for="project-overwrite-claude-setting">
               <input type="checkbox" id="project-overwrite-claude-setting">
               保存时覆盖工作目录 `.claude/settings.local.json`
+            </label>
+          </div>
+          <div class="form-group" id="project-enabled-group">
+            <label class="checkbox-label" for="project-enabled">
+              <input type="checkbox" id="project-enabled">
+              启用此项目（允许 Start）
             </label>
           </div>
         </form>
