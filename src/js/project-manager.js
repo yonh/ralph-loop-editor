@@ -882,8 +882,7 @@ export class ProjectManager {
         this.onProjectRun(selectedProject);
       }
 
-      // The actual start will be handled by the main application
-      this.showSuccess(`项目 "${selectedProject.name}" 已设置为当前项目，可以开始运行`);
+      this.showSuccess(`项目 "${selectedProject.name}" 已切换到主控区`);
     });
   }
 
@@ -912,16 +911,19 @@ export class ProjectManager {
   /**
    * Update all projects running state
    */
-  updateAllProjectsRunningState(runningProjectId) {
+  updateAllProjectsRunningState(runningProjectIds = []) {
+    const normalizedIds = Array.isArray(runningProjectIds)
+      ? runningProjectIds
+      : (runningProjectIds ? [runningProjectIds] : []);
+    const runningSet = new Set(normalizedIds);
+
     // Reset all projects to not running
     this.projects.forEach(project => {
       this.updateProjectRunningState(project.id, false);
     });
 
-    // Set current project as running if provided
-    if (runningProjectId) {
-      this.updateProjectRunningState(runningProjectId, true);
-    }
+    // Mark all running projects
+    runningSet.forEach((projectId) => this.updateProjectRunningState(projectId, true));
   }
 
   /**

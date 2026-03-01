@@ -466,6 +466,60 @@
       justify-content: center;
       margin-top: 20px;
     }
+    .running-sessions {
+      margin-top: 12px;
+      border: 1px solid #dbeafe;
+      background: #eff6ff;
+      border-radius: 10px;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 44px;
+      flex-wrap: wrap;
+    }
+    .running-sessions[hidden] {
+      display: none;
+    }
+    .running-sessions-label {
+      font-size: 0.8rem;
+      color: #1d4ed8;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .running-sessions-list {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      min-height: 28px;
+    }
+    .running-session-chip {
+      border: 1px solid #93c5fd;
+      background: #ffffff;
+      color: #1e3a8a;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      padding: 4px 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .running-session-chip:hover {
+      border-color: #3b82f6;
+      background: #dbeafe;
+    }
+    .running-session-chip.active {
+      border-color: #1d4ed8;
+      background: #1d4ed8;
+      color: #ffffff;
+    }
+    .running-session-pid {
+      font-size: 0.7rem;
+      opacity: 0.85;
+    }
     button {
       padding: 12px 24px;
       font-size: 1rem;
@@ -907,6 +961,10 @@
       <button id="toggle-btn"><i data-lucide="toggle-left"></i> Enable Project</button>
       <button id="start-btn" disabled><i data-lucide="play"></i> Start</button>
       <button id="stop-btn" disabled><i data-lucide="square"></i> Stop</button>
+    </div>
+    <div class="running-sessions" id="running-sessions" hidden>
+      <span class="running-sessions-label">运行中任务</span>
+      <div class="running-sessions-list" id="running-sessions-list"></div>
     </div>
 
     <div class="logs-tabs">

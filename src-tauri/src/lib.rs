@@ -1,5 +1,5 @@
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, LazyLock};
@@ -8,21 +8,30 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
 use dirs::home_dir;
 use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// Runtime session for one active loop process.
 struct LoopSession {
+    session_id: String,
+    project_id: String,
     pid: Option<u32>,
     child: Box<dyn portable_pty::Child + Send>,
     writer: Box<dyn Write + Send>,
     pty_master: Box<dyn portable_pty::MasterPty + Send>,
 }
 
-static LOOP_STATE: Mutex<Option<LoopSession>> = Mutex::new(None);
-static OUTPUT_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+/// Runtime process state for all active sessions.
+#[derive(Default)]
+struct RuntimeState {
+    sessions: HashMap<String, LoopSession>,
+    project_sessions: HashMap<String, String>,
+    project_last_session: HashMap<String, String>,
+    output_buffers: HashMap<String, VecDeque<String>>,
+}
+
+static RUNTIME_STATE: LazyLock<Mutex<RuntimeState>> = LazyLock::new(|| Mutex::new(RuntimeState::default()));
 static PROJECT_STATE: LazyLock<AsyncMutex<ProjectState>> = LazyLock::new(|| AsyncMutex::new(ProjectState::new()));
 
 /// Maximum number of chunks kept in the in-memory output buffer.
@@ -347,8 +356,20 @@ async fn apply_claude_setting_to_work_directory(setting_file_path: &str, work_di
 struct RuntimeDebugState {
     current_project_id: Option<String>,
     current_project_enabled: Option<bool>,
-    loop_running: bool,
-    loop_pid: Option<u32>,
+    current_project_loop_running: bool,
+    current_project_loop_pid: Option<u32>,
+    current_project_session_id: Option<String>,
+    total_running_sessions: usize,
+    running_project_ids: Vec<String>,
+    running_sessions: Vec<RuntimeSessionSummary>,
+}
+
+#[derive(Serialize)]
+/// Lightweight runtime session info for UI status sync.
+struct RuntimeSessionSummary {
+    session_id: String,
+    project_id: String,
+    pid: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -366,37 +387,75 @@ struct ClaudeRuntimeDebugContext {
 }
 
 /// Pushes a chunk into the output buffer and trims old entries.
-fn push_output_chunk(chunk: String) {
-    match OUTPUT_BUFFER.lock() {
-        Ok(mut buffer) => {
+fn push_output_chunk(session_id: &str, chunk: String) {
+    match RUNTIME_STATE.lock() {
+        Ok(mut state) => {
+            let buffer = state
+                .output_buffers
+                .entry(session_id.to_string())
+                .or_insert_with(VecDeque::new);
             buffer.push_back(chunk);
             while buffer.len() > OUTPUT_BUFFER_LIMIT {
                 let _ = buffer.pop_front();
             }
         }
         Err(err) => {
-            log::error!("[push_output_chunk] failed to lock OUTPUT_BUFFER: {}", err);
+            log::error!("[push_output_chunk] failed to lock RUNTIME_STATE: {}", err);
         }
     }
 }
 
-/// Clears the active session when the given pid matches current runtime pid.
-fn clear_loop_state_for_pid(pid: Option<u32>) {
-    match LOOP_STATE.lock() {
+/// Normalizes optional session/project selector input.
+fn normalize_selector(value: Option<String>) -> Option<String> {
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+}
+
+/// Resolves one running session id from optional project/session selectors.
+fn resolve_target_session_id(
+    state: &RuntimeState,
+    project_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<String, String> {
+    if let Some(candidate) = session_id {
+        if state.sessions.contains_key(candidate) || state.output_buffers.contains_key(candidate) {
+            return Ok(candidate.to_string());
+        }
+        return Err(format!("运行会话不存在: {}", candidate));
+    }
+
+    if let Some(project) = project_id {
+        if let Some(found) = state.project_sessions.get(project) {
+            return Ok(found.clone());
+        }
+        if let Some(found) = state.project_last_session.get(project) {
+            return Ok(found.clone());
+        }
+        return Err(format!("项目没有正在运行的会话: {}", project));
+    }
+
+    Err("必须提供 session_id 或 project_id".to_string())
+}
+
+/// Clears one runtime session and detaches its project index.
+fn clear_loop_state_for_session(session_id: &str) {
+    match RUNTIME_STATE.lock() {
         Ok(mut state) => {
-            let should_clear = state
-                .as_ref()
-                .map(|session| session.pid == pid)
-                .unwrap_or(false);
-            if should_clear {
-                *state = None;
-                log::info!("[clear_loop_state_for_pid] cleared session for pid={:?}", pid);
+            if let Some(session) = state.sessions.remove(session_id) {
+                state.project_sessions.remove(&session.project_id);
+                log::info!(
+                    "[clear_loop_state_for_session] cleared session={} project={} pid={:?}",
+                    session_id,
+                    session.project_id,
+                    session.pid
+                );
             }
         }
         Err(err) => {
             log::error!(
-                "[clear_loop_state_for_pid] failed to lock LOOP_STATE for pid={:?}: {}",
-                pid,
+                "[clear_loop_state_for_session] failed to lock RUNTIME_STATE for session={}: {}",
+                session_id,
                 err
             );
         }
@@ -404,7 +463,7 @@ fn clear_loop_state_for_pid(pid: Option<u32>) {
 }
 
 /// Starts a background reader thread for process output.
-fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
+fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session_id: String) {
     thread::spawn(move || {
         let mut buf = [0u8; 2048];
         let mut pending_bytes: Vec<u8> = Vec::new();
@@ -414,11 +473,11 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
                 Ok(0) => {
                     if !pending_bytes.is_empty() {
                         let flushed = String::from_utf8_lossy(&pending_bytes).to_string();
-                        push_output_chunk(flushed);
+                        push_output_chunk(&session_id, flushed);
                         pending_bytes.clear();
                     }
-                    push_output_chunk("\n[system] loop process output stream closed.\n".to_string());
-                    clear_loop_state_for_pid(pid);
+                    push_output_chunk(&session_id, "\n[system] loop process output stream closed.\n".to_string());
+                    clear_loop_state_for_session(&session_id);
                     break;
                 }
                 Ok(size) => {
@@ -428,7 +487,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
                         match std::str::from_utf8(&pending_bytes) {
                             Ok(text) => {
                                 if !text.is_empty() {
-                                    push_output_chunk(text.to_string());
+                                    push_output_chunk(&session_id, text.to_string());
                                 }
                                 pending_bytes.clear();
                                 break;
@@ -438,7 +497,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
                                 if valid_up_to > 0 {
                                     let valid_text =
                                         String::from_utf8_lossy(&pending_bytes[..valid_up_to]).to_string();
-                                    push_output_chunk(valid_text);
+                                    push_output_chunk(&session_id, valid_text);
                                     pending_bytes.drain(..valid_up_to);
                                 }
 
@@ -446,6 +505,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
                                     let remove_len = error_len.min(pending_bytes.len());
                                     pending_bytes.drain(..remove_len);
                                     push_output_chunk(
+                                        &session_id,
                                         "\n[system] skipped undecodable output bytes.\n".to_string(),
                                     );
                                     continue;
@@ -458,8 +518,8 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, pid: Option<u32>) {
                     }
                 }
                 Err(err) => {
-                    push_output_chunk(format!("\n[system] output read error: {}\n", err));
-                    clear_loop_state_for_pid(pid);
+                    push_output_chunk(&session_id, format!("\n[system] output read error: {}\n", err));
+                    clear_loop_state_for_session(&session_id);
                     break;
                 }
             }
@@ -550,31 +610,92 @@ async fn get_runtime_debug_state() -> Result<RuntimeDebugState, String> {
         (current_project_id, current_project_enabled)
     };
 
-    let loop_state = LOOP_STATE.lock().map_err(|err| {
+    let runtime_state = RUNTIME_STATE.lock().map_err(|err| {
         log::error!(
-            "[get_runtime_debug_state] failed to lock LOOP_STATE: {}",
+            "[get_runtime_debug_state] failed to lock RUNTIME_STATE: {}",
             err
         );
-        format!("Failed to read loop state: {}", err)
+        format!("Failed to read runtime state: {}", err)
     })?;
+
+    let current_project_session_id = current_project_id
+        .as_ref()
+        .and_then(|project_id| runtime_state.project_sessions.get(project_id))
+        .cloned();
+    let current_project_loop_pid = current_project_session_id
+        .as_ref()
+        .and_then(|session_id| runtime_state.sessions.get(session_id))
+        .and_then(|session| session.pid);
+
+    let mut running_project_ids: Vec<String> = runtime_state
+        .project_sessions
+        .keys()
+        .cloned()
+        .collect();
+    running_project_ids.sort_unstable();
+
+    let mut running_sessions: Vec<RuntimeSessionSummary> = runtime_state
+        .sessions
+        .values()
+        .map(|session| RuntimeSessionSummary {
+            session_id: session.session_id.clone(),
+            project_id: session.project_id.clone(),
+            pid: session.pid,
+        })
+        .collect();
+    running_sessions.sort_by(|left, right| left.project_id.cmp(&right.project_id));
 
     Ok(RuntimeDebugState {
         current_project_id,
         current_project_enabled,
-        loop_running: loop_state.is_some(),
-        loop_pid: loop_state.as_ref().and_then(|session| session.pid),
+        current_project_loop_running: current_project_session_id.is_some(),
+        current_project_loop_pid,
+        current_project_session_id,
+        total_running_sessions: runtime_state.sessions.len(),
+        running_project_ids,
+        running_sessions,
     })
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Drains and returns current buffered output chunks from the process.
-fn poll_loop_output() -> Result<Vec<String>, String> {
-    let mut buffer = OUTPUT_BUFFER.lock().map_err(|err| {
-        log::error!("[poll_loop_output] failed to lock OUTPUT_BUFFER: {}", err);
-        format!("Failed to read output buffer: {}", err)
+fn poll_loop_output(project_id: Option<String>, session_id: Option<String>) -> Result<Vec<String>, String> {
+    let normalized_project_id = normalize_selector(project_id);
+    let normalized_session_id = normalize_selector(session_id);
+
+    let mut state = RUNTIME_STATE.lock().map_err(|err| {
+        log::error!("[poll_loop_output] failed to lock RUNTIME_STATE: {}", err);
+        format!("Failed to read runtime state: {}", err)
     })?;
 
-    Ok(buffer.drain(..).collect())
+    let resolved_session_id = match resolve_target_session_id(
+        &state,
+        normalized_project_id.as_deref(),
+        normalized_session_id.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let has_running_session = state.sessions.contains_key(&resolved_session_id);
+    let chunks = if let Some(buffer) = state.output_buffers.get_mut(&resolved_session_id) {
+        buffer.drain(..).collect()
+    } else {
+        vec![]
+    };
+
+    if !has_running_session {
+        if state
+            .output_buffers
+            .get(&resolved_session_id)
+            .map(|buffer| buffer.is_empty())
+            .unwrap_or(false)
+        {
+            state.output_buffers.remove(&resolved_session_id);
+        }
+    }
+
+    Ok(chunks)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -639,15 +760,29 @@ async fn inspect_claude_runtime_context(work_dir: String) -> Result<ClaudeRuntim
 
 #[tauri::command(rename_all = "snake_case")]
 /// Sends user input to the running loop process.
-fn send_loop_input(input: String, append_newline: Option<bool>) -> Result<String, String> {
-    let mut state = LOOP_STATE.lock().map_err(|err| {
-        log::error!("[send_loop_input] failed to lock LOOP_STATE: {}", err);
-        format!("Failed to access loop state: {}", err)
+fn send_loop_input(
+    input: String,
+    append_newline: Option<bool>,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<String, String> {
+    let normalized_project_id = normalize_selector(project_id);
+    let normalized_session_id = normalize_selector(session_id);
+
+    let mut state = RUNTIME_STATE.lock().map_err(|err| {
+        log::error!("[send_loop_input] failed to lock RUNTIME_STATE: {}", err);
+        format!("Failed to access runtime state: {}", err)
     })?;
 
+    let resolved_session_id = resolve_target_session_id(
+        &state,
+        normalized_project_id.as_deref(),
+        normalized_session_id.as_deref(),
+    )?;
     let session = state
-        .as_mut()
-        .ok_or_else(|| "No loop process is running".to_string())?;
+        .sessions
+        .get_mut(&resolved_session_id)
+        .ok_or_else(|| format!("No loop process is running for session {}", resolved_session_id))?;
 
     let payload = if append_newline.unwrap_or(true) {
         format!("{}\n", input)
@@ -670,17 +805,31 @@ fn send_loop_input(input: String, append_newline: Option<bool>) -> Result<String
 
 #[tauri::command(rename_all = "snake_case")]
 /// Resizes the PTY of the running loop process.
-fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
+fn resize_pty(
+    cols: u16,
+    rows: u16,
+    project_id: Option<String>,
+    session_id: Option<String>,
+) -> Result<String, String> {
     log::info!("[resize_pty] called with cols={}, rows={}", cols, rows);
-    
-    let mut state = LOOP_STATE.lock().map_err(|err| {
-        log::error!("[resize_pty] failed to lock LOOP_STATE: {}", err);
-        format!("Failed to access loop state: {}", err)
+
+    let normalized_project_id = normalize_selector(project_id);
+    let normalized_session_id = normalize_selector(session_id);
+
+    let mut state = RUNTIME_STATE.lock().map_err(|err| {
+        log::error!("[resize_pty] failed to lock RUNTIME_STATE: {}", err);
+        format!("Failed to access runtime state: {}", err)
     })?;
 
+    let resolved_session_id = resolve_target_session_id(
+        &state,
+        normalized_project_id.as_deref(),
+        normalized_session_id.as_deref(),
+    )?;
     let session = state
-        .as_mut()
-        .ok_or_else(|| "No loop process is running".to_string())?;
+        .sessions
+        .get_mut(&resolved_session_id)
+        .ok_or_else(|| format!("No loop process is running for session {}", resolved_session_id))?;
 
     // Resize the PTY
     session.pty_master.resize(PtySize {
@@ -700,6 +849,7 @@ fn resize_pty(cols: u16, rows: u16) -> Result<String, String> {
 #[tauri::command(rename_all = "snake_case")]
 /// Starts the loop process in the optional working directory.
 async fn start_loop(
+    project_id: Option<String>,
     work_dir: Option<String>,
     prompt: Option<String>,
     max_iterations: Option<u32>,
@@ -713,6 +863,7 @@ async fn start_loop(
         completion_promise
     );
 
+    let requested_project_id = normalize_selector(project_id);
     let current_project = {
         let mut project_state = PROJECT_STATE.lock().await;
         project_state.ensure_initialized().await.map_err(|err| {
@@ -720,18 +871,21 @@ async fn start_loop(
             err
         })?;
 
-        let current_project_id = project_state
-            .config
-            .current_project_id
-            .clone()
-            .ok_or_else(|| "请先选择一个项目".to_string())?;
+        let selected_project_id = match requested_project_id {
+            Some(ref id) => id.clone(),
+            None => project_state
+                .config
+                .current_project_id
+                .clone()
+                .ok_or_else(|| "请先选择一个项目".to_string())?,
+        };
 
         project_state
             .config
             .projects
-            .get(&current_project_id)
+            .get(&selected_project_id)
             .cloned()
-            .ok_or_else(|| format!("当前项目不存在: {}", current_project_id))?
+            .ok_or_else(|| format!("当前项目不存在: {}", selected_project_id))?
     };
 
     if !current_project.enabled {
@@ -743,14 +897,17 @@ async fn start_loop(
         return Err("当前项目未启用，请先在项目卡片或主控区启用该项目".to_string());
     }
 
-    let mut state = LOOP_STATE.lock().map_err(|err| {
-        log::error!("[start_loop] failed to lock LOOP_STATE: {}", err);
-        format!("Failed to access loop state: {}", err)
+    let mut state = RUNTIME_STATE.lock().map_err(|err| {
+        log::error!("[start_loop] failed to lock RUNTIME_STATE: {}", err);
+        format!("Failed to access runtime state: {}", err)
     })?;
 
-    if state.is_some() {
-        log::warn!("[start_loop] ignored because loop is already running");
-        return Ok("Loop already running".to_string());
+    if state.project_sessions.contains_key(&current_project.id) {
+        log::warn!(
+            "[start_loop] ignored because project already has running session: {}",
+            current_project.id
+        );
+        return Ok("Loop already running for project".to_string());
     }
 
     let task_prompt = prompt.unwrap_or_else(|| DEFAULT_PROMPT.to_string());
@@ -813,44 +970,68 @@ async fn start_loop(
         .take_writer()
         .map_err(|err| format!("Failed to open input writer: {}", err))?;
 
-    match OUTPUT_BUFFER.lock() {
-        Ok(mut buffer) => buffer.clear(),
-        Err(err) => {
-            log::error!("[start_loop] failed to clear OUTPUT_BUFFER: {}", err);
+    let session_id = Uuid::new_v4().to_string();
+    state.output_buffers.insert(session_id.clone(), VecDeque::new());
+    state.project_sessions.insert(current_project.id.clone(), session_id.clone());
+    let previous_session_id = state
+        .project_last_session
+        .insert(current_project.id.clone(), session_id.clone());
+    if let Some(previous) = previous_session_id {
+        if previous != session_id && !state.sessions.contains_key(&previous) {
+            state.output_buffers.remove(&previous);
         }
     }
+    state.sessions.insert(
+        session_id.clone(),
+        LoopSession {
+            session_id: session_id.clone(),
+            project_id: current_project.id.clone(),
+            pid,
+            child,
+            writer,
+            pty_master: pty_pair.master,
+        },
+    );
+    drop(state);
 
-    push_output_chunk(format!("[system] loop process started, pid={:?}\n", pid));
-    spawn_output_reader(reader, pid);
-
-    *state = Some(LoopSession { 
-        pid, 
-        child, 
-        writer, 
-        pty_master: pty_pair.master
-    });
+    push_output_chunk(
+        &session_id,
+        format!("[system] loop process started, pid={:?}, session={}\n", pid, session_id),
+    );
+    spawn_output_reader(reader, session_id.clone());
 
     thread::sleep(Duration::from_millis(200));
-    Ok("Loop started".to_string())
+    Ok(format!("Loop started (session_id={})", session_id))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 /// Stops the currently running loop process if present.
-fn stop_loop() -> Result<String, String> {
+fn stop_loop(project_id: Option<String>, session_id: Option<String>) -> Result<String, String> {
     log::info!("[stop_loop] called");
+    let normalized_project_id = normalize_selector(project_id);
+    let normalized_session_id = normalize_selector(session_id);
 
-    let mut state = LOOP_STATE.lock().map_err(|err| {
-        log::error!("[stop_loop] failed to lock LOOP_STATE: {}", err);
-        format!("Failed to access loop state: {}", err)
+    let mut state = RUNTIME_STATE.lock().map_err(|err| {
+        log::error!("[stop_loop] failed to lock RUNTIME_STATE: {}", err);
+        format!("Failed to access runtime state: {}", err)
     })?;
 
-    let mut session = match state.take() {
-        Some(session) => session,
-        None => {
-            log::warn!("[stop_loop] no running process found");
-            return Ok("No loop running".to_string());
-        }
+    let resolved_session_id = match resolve_target_session_id(
+        &state,
+        normalized_project_id.as_deref(),
+        normalized_session_id.as_deref(),
+    ) {
+        Ok(session) => session,
+        Err(_) => return Ok("No loop running".to_string()),
     };
+    let mut session = match state.sessions.remove(&resolved_session_id) {
+        Some(session) => session,
+        None => return Ok("No loop running".to_string()),
+    };
+    state.project_sessions.remove(&session.project_id);
+    let detached_session_id = session.session_id.clone();
+    let detached_project_id = session.project_id.clone();
+    drop(state);
 
     let pid = session.pid;
     session
@@ -859,8 +1040,14 @@ fn stop_loop() -> Result<String, String> {
         .map_err(|err| format!("Failed to stop loop process: {}", err))?;
 
     let _ = session.child.wait();
-    push_output_chunk(format!("\n[system] loop process stopped, pid={:?}\n", pid));
-    Ok("Loop stopped".to_string())
+    push_output_chunk(
+        &detached_session_id,
+        format!(
+            "\n[system] loop process stopped, project={}, pid={:?}, session={}\n",
+            detached_project_id, pid, detached_session_id
+        ),
+    );
+    Ok(format!("Loop stopped (session_id={})", detached_session_id))
 }
 
 #[tauri::command]
@@ -1390,6 +1577,18 @@ async fn delete_project(project_id: String) -> Result<String, String> {
         state.config.current_project_id = previous_current_project_id;
         log::error!("[delete_project] failed to save config: {}", e);
         return Err(e);
+    }
+
+    drop(state);
+
+    // Best-effort cleanup for runtime sessions/buffers bound to this project.
+    let _ = stop_loop(Some(project_id.clone()), None);
+    if let Ok(mut runtime_state) = RUNTIME_STATE.lock() {
+        if let Some(last_session_id) = runtime_state.project_last_session.remove(&project_id) {
+            if !runtime_state.sessions.contains_key(&last_session_id) {
+                runtime_state.output_buffers.remove(&last_session_id);
+            }
+        }
     }
 
     log::info!(

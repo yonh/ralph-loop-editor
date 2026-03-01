@@ -25,14 +25,139 @@ let invoke = null;
 let terminalComponent = null;
 let projectManager = null;
 let currentProjectEnabled = false;
-let running = false;
+let runningProjectIds = new Set();
+let runningSessions = [];
 let outputPollTimer = null;
 let statePollTimer = null;
 let lastBackendStateSignature = '';
 let projectAutoSaveTimer = null;
 let projectAutoSaveInFlight = false;
 let projectAutoSavePending = false;
+let outputPollInFlight = false;
 const PROJECT_AUTO_SAVE_DELAY_MS = 700;
+const TERMINAL_HISTORY_LIMIT = 200_000;
+const terminalHistoryByProject = new Map();
+
+function getCurrentProject() {
+  return projectManager?.getCurrentProject() || null;
+}
+
+function isProjectRunning(projectId) {
+  return Boolean(projectId) && runningProjectIds.has(projectId);
+}
+
+function isCurrentProjectRunning() {
+  const currentProject = getCurrentProject();
+  return isProjectRunning(currentProject?.id || null);
+}
+
+function getRunningSessionByProject(projectId) {
+  if (!projectId) {
+    return null;
+  }
+  return runningSessions.find((session) => session.project_id === projectId) || null;
+}
+
+function getRunningSessionById(sessionId) {
+  if (!sessionId) {
+    return null;
+  }
+  return runningSessions.find((session) => session.session_id === sessionId) || null;
+}
+
+function renderRunningSessionsBar() {
+  if (!runningSessionsContainer || !runningSessionsList) {
+    return;
+  }
+
+  if (runningProjectIds.size === 0) {
+    runningSessionsContainer.hidden = true;
+    runningSessionsList.innerHTML = '';
+    return;
+  }
+
+  const currentProjectId = getCurrentProject()?.id || null;
+  const projects = projectManager?.getProjects?.() || [];
+  const projectNameMap = new Map(projects.map((project) => [project.id, project.name]));
+  const sortedProjectIds = Array.from(runningProjectIds).sort((left, right) => {
+    const leftName = (projectNameMap.get(left) || left).toLowerCase();
+    const rightName = (projectNameMap.get(right) || right).toLowerCase();
+    return leftName.localeCompare(rightName);
+  });
+
+  runningSessionsList.innerHTML = '';
+  sortedProjectIds.forEach((projectId) => {
+    const projectName = projectNameMap.get(projectId) || projectId;
+    const session = getRunningSessionByProject(projectId);
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = `running-session-chip${currentProjectId === projectId ? ' active' : ''}`;
+    chip.title = `切换到 ${projectName}（Alt+点击可停止该任务）`;
+
+    const name = document.createElement('span');
+    name.textContent = projectName;
+    chip.appendChild(name);
+
+    if (session?.pid) {
+      const pid = document.createElement('span');
+      pid.className = 'running-session-pid';
+      pid.textContent = `PID ${session.pid}`;
+      chip.appendChild(pid);
+    }
+
+    chip.addEventListener('click', (event) => {
+      if (event.altKey) {
+        void handleStop({ projectId, sessionId: session?.session_id || null });
+        return;
+      }
+      if (currentProjectId === projectId) {
+        return;
+      }
+      void projectManager?.setCurrentProject(projectId);
+    });
+
+    runningSessionsList.appendChild(chip);
+  });
+  runningSessionsContainer.hidden = false;
+}
+
+function appendProjectTerminalOutput(projectId, chunk) {
+  if (!projectId || !chunk) {
+    return;
+  }
+
+  const previous = terminalHistoryByProject.get(projectId) || '';
+  const merged = previous + chunk;
+  terminalHistoryByProject.set(
+    projectId,
+    merged.length > TERMINAL_HISTORY_LIMIT ? merged.slice(-TERMINAL_HISTORY_LIMIT) : merged
+  );
+
+  const currentProject = getCurrentProject();
+  if (currentProject && currentProject.id === projectId) {
+    appendTerminalOutput(chunk);
+  }
+}
+
+function clearTerminalView() {
+  if (terminalComponent && terminalComponent.isInitialized()) {
+    terminalComponent.clear();
+  } else {
+    terminalOutput.textContent = '';
+  }
+}
+
+function renderSelectedProjectTerminalHistory(project) {
+  clearTerminalView();
+  if (!project) {
+    return;
+  }
+
+  const history = terminalHistoryByProject.get(project.id) || '';
+  if (history) {
+    appendTerminalOutput(history);
+  }
+}
 
 /**
  * Refresh all Lucide icons on the page
@@ -69,6 +194,8 @@ const tabTerminal = document.getElementById('tab-terminal');
 const tabDebug = document.getElementById('tab-debug');
 const panelTerminal = document.getElementById('panel-terminal');
 const panelDebug = document.getElementById('panel-debug');
+const runningSessionsContainer = document.getElementById('running-sessions');
+const runningSessionsList = document.getElementById('running-sessions-list');
 
 /**
  * Returns the Tauri invoke function if available.
@@ -150,8 +277,18 @@ async function initTerminal() {
     // Set resize callback to notify backend of terminal size changes
     terminalComponent.setResizeCallback(async (cols, rows) => {
       try {
+        const currentProject = getCurrentProject();
+        if (!currentProject || !isProjectRunning(currentProject.id)) {
+          return;
+        }
+        const runningSession = getRunningSessionByProject(currentProject.id);
         // Notify backend of new terminal size for PTY adjustment
-        await invoke('resize_pty', { cols, rows });
+        await invoke('resize_pty', {
+          cols,
+          rows,
+          project_id: currentProject.id,
+          session_id: runningSession?.session_id || null
+        });
       } catch (err) {
         // Ignore resize errors - backend might not support this command
         console.debug('PTY resize notification failed:', err);
@@ -163,8 +300,10 @@ async function initTerminal() {
     // Setup input handling
     terminalComponent.setupInput((data) => {
       // Forward terminal input to backend when running
-      if (running) {
-        sendLoopInput(data);
+      const currentProject = getCurrentProject();
+      if (currentProject && isProjectRunning(currentProject.id)) {
+        const runningSession = getRunningSessionByProject(currentProject.id);
+        sendLoopInput(data, currentProject.id, runningSession?.session_id || null);
       }
     });
 
@@ -225,10 +364,11 @@ async function invokeWithDebug(command, args) {
 async function refreshBackendDebugState() {
   try {
     const state = await invokeWithDebug('get_runtime_debug_state');
-    const previousRunning = running;
+    const previousCurrentRunning = isCurrentProjectRunning();
     const hasCurrentProjectEnabled = state.current_project_enabled !== null && state.current_project_enabled !== undefined;
     currentProjectEnabled = hasCurrentProjectEnabled ? Boolean(state.current_project_enabled) : false;
-    running = Boolean(state.loop_running);
+    runningProjectIds = new Set(Array.isArray(state.running_project_ids) ? state.running_project_ids : []);
+    runningSessions = Array.isArray(state.running_sessions) ? state.running_sessions : [];
 
     if (projectManager && state.current_project_id && hasCurrentProjectEnabled) {
       projectManager.updateProjectEnabledState(state.current_project_id, currentProjectEnabled);
@@ -240,11 +380,8 @@ async function refreshBackendDebugState() {
       lastBackendStateSignature = stateSignature;
     }
 
-    if (previousRunning && !running) {
-      workDirInput.disabled = false;
-      promptInput.disabled = false;
-      maxIterationsInput.disabled = false;
-      completionPromiseInput.disabled = false;
+    if (previousCurrentRunning && !isCurrentProjectRunning()) {
+      appendDebugLog('current project stopped');
     }
 
     syncUI();
@@ -257,10 +394,57 @@ async function refreshBackendDebugState() {
  * Polls and flushes new loop output chunks into the terminal panel.
  */
 async function pollLoopOutput() {
+  if (outputPollInFlight) {
+    return;
+  }
+  if (runningProjectIds.size === 0) {
+    return;
+  }
+
+  outputPollInFlight = true;
+
   try {
-    const chunks = await invoke('poll_loop_output');
+    const pollingSessions = runningSessions.slice();
+    const responses = await Promise.all(
+      pollingSessions.map(async (session) => {
+        const chunks = await invoke('poll_loop_output', {
+          project_id: session.project_id,
+          session_id: session.session_id
+        });
+        return { session, chunks };
+      })
+    );
+
+    responses.forEach(({ session, chunks }) => {
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return;
+      }
+      chunks.forEach((chunk) => appendProjectTerminalOutput(session.project_id, String(chunk)));
+    });
+  } catch (err) {
+    appendDebugLog('poll_loop_output failed', err);
+  } finally {
+    outputPollInFlight = false;
+  }
+}
+
+/**
+ * Poll output once for the selected project.
+ */
+async function pollCurrentProjectOutput() {
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    return;
+  }
+  const runningSession = getRunningSessionByProject(currentProject.id);
+
+  try {
+    const chunks = await invoke('poll_loop_output', {
+      project_id: currentProject.id,
+      session_id: runningSession?.session_id || null
+    });
     if (Array.isArray(chunks) && chunks.length > 0) {
-      chunks.forEach((chunk) => appendTerminalOutput(String(chunk)));
+      chunks.forEach((chunk) => appendProjectTerminalOutput(currentProject.id, String(chunk)));
     }
   } catch (err) {
     appendDebugLog('poll_loop_output failed', err);
@@ -302,22 +486,31 @@ function stopPolling() {
  * Synchronizes the visual state with the in-memory state flags.
  */
 function syncUI() {
-  const currentProject = projectManager?.getCurrentProject() || null;
+  const currentProject = getCurrentProject();
   const hasCurrentProject = Boolean(currentProject);
-  toggleBtn.disabled = !hasCurrentProject || running;
+  const currentProjectRunning = hasCurrentProject && isProjectRunning(currentProject.id);
+  const runningCount = runningProjectIds.size;
+  toggleBtn.disabled = !hasCurrentProject || currentProjectRunning;
   toggleBtn.innerHTML = `<i data-lucide="${currentProjectEnabled ? 'toggle-right' : 'toggle-left'}"></i> ${currentProjectEnabled ? 'Disable Project' : 'Enable Project'}`;
-  startBtn.disabled = !hasCurrentProject || !currentProjectEnabled || running;
-  stopBtn.disabled = !running;
-  sendBtn.disabled = !running;
-  terminalInput.disabled = !running;
+  startBtn.disabled = !hasCurrentProject || !currentProjectEnabled || currentProjectRunning;
+  stopBtn.disabled = !currentProjectRunning;
+  sendBtn.disabled = !currentProjectRunning;
+  terminalInput.disabled = !currentProjectRunning;
+  workDirInput.disabled = currentProjectRunning;
+  promptInput.disabled = currentProjectRunning;
+  maxIterationsInput.disabled = currentProjectRunning;
+  completionPromiseInput.disabled = currentProjectRunning;
   statusDiv.className = 'status';
 
-  if (running) {
+  if (currentProjectRunning) {
     statusDiv.classList.add('running');
-    statusDiv.textContent = 'Status: Running';
+    statusDiv.textContent = `Status: Running (${runningCount} task${runningCount === 1 ? '' : 's'})`;
   } else if (!hasCurrentProject) {
     statusDiv.classList.add('disabled');
     statusDiv.textContent = 'Status: No Project Selected';
+  } else if (runningCount > 0) {
+    statusDiv.classList.add('enabled');
+    statusDiv.textContent = `Status: Current Idle (${runningCount} task${runningCount === 1 ? '' : 's'} running)`;
   } else if (currentProjectEnabled) {
     statusDiv.classList.add('enabled');
     statusDiv.textContent = 'Status: Project Enabled';
@@ -326,14 +519,14 @@ function syncUI() {
     statusDiv.textContent = 'Status: Project Disabled';
   }
 
+  renderRunningSessionsBar();
+
   // Refresh icons for modified buttons
   refreshPageIcons();
 
   // Update project running states
   if (projectManager) {
-    const currentProject = projectManager.getCurrentProject();
-    const runningProjectId = running && currentProject ? currentProject.id : null;
-    projectManager.updateAllProjectsRunningState(runningProjectId);
+    projectManager.updateAllProjectsRunningState(Array.from(runningProjectIds));
   }
 }
 
@@ -395,7 +588,7 @@ async function flushProjectAutoSave(reason = 'manual-flush', options = {}) {
   if (!currentProject || !projectManager) {
     return;
   }
-  if (running && !force) {
+  if (isCurrentProjectRunning() && !force) {
     return;
   }
 
@@ -437,7 +630,7 @@ function queueProjectAutoSave(reason = 'input', options = {}) {
   if (!currentProject || !projectManager) {
     return;
   }
-  if (running && !force) {
+  if (isCurrentProjectRunning() && !force) {
     return;
   }
 
@@ -451,11 +644,17 @@ function queueProjectAutoSave(reason = 'input', options = {}) {
 /**
  * Sends input to the running loop process.
  */
-async function sendLoopInput(input) {
+async function sendLoopInput(input, projectId = null, sessionId = null) {
+  if (!projectId) {
+    return;
+  }
+  const resolvedSessionId = sessionId || getRunningSessionByProject(projectId)?.session_id || null;
   try {
     await invokeWithDebug('send_loop_input', {
       input: input,
       append_newline: false, // Let terminal handle newlines
+      project_id: projectId,
+      session_id: resolvedSessionId,
     });
   } catch (err) {
     appendDebugLog('send input failed', err);
@@ -465,24 +664,37 @@ async function sendLoopInput(input) {
 /**
  * Handles project run requests
  */
-function handleProjectRun(project) {
+async function handleProjectRun(project) {
   console.log('[handleProjectRun] project run requested:', project.name);
 
   // Update form with project data
   handleProjectChange(project);
-  const projectEnabledAtSelection = Boolean(project.enabled);
-
-  // Start the loop if enabled
-  if (projectEnabledAtSelection) {
-    handleStart();
-  } else {
-    // Enable first, then start
-    handleToggle().then((success) => {
-      if (success) {
-        setTimeout(handleStart, 500);
-      }
-    });
+  const projectId = project?.id || null;
+  if (!projectId) {
+    return;
   }
+
+  if (isProjectRunning(projectId)) {
+    await handleStop({ projectId });
+    return;
+  }
+
+  if (!Boolean(project.enabled)) {
+    try {
+      const updatedProject = await invokeWithDebug('set_project_enabled', {
+        project_id: projectId,
+        enabled: true
+      });
+      currentProjectEnabled = Boolean(updatedProject.enabled);
+      projectManager?.updateProjectEnabledState(projectId, updatedProject.enabled);
+    } catch (err) {
+      appendDebugLog('run-project enable failed', err);
+      alert(`启用项目失败: ${serializeDebugValue(err)}`);
+      return;
+    }
+  }
+
+  await handleStart({ projectId });
 }
 
 /**
@@ -515,7 +727,9 @@ function handleProjectChange(project) {
     completionPromiseInput.value = '';
   }
 
+  renderSelectedProjectTerminalHistory(project);
   syncUI();
+  void refreshBackendDebugState().then(() => pollCurrentProjectOutput());
 }
 
 /**
@@ -599,7 +813,8 @@ async function handleToggle() {
   appendDebugLog('toggle button clicked', {
     current_project_id: currentProject?.id || null,
     current_project_enabled: currentProjectEnabled,
-    running
+    current_project_running: isCurrentProjectRunning(),
+    running_count: runningProjectIds.size
   });
 
   if (!currentProject) {
@@ -630,12 +845,18 @@ async function handleToggle() {
 /**
  * Handles start button clicks.
  */
-async function handleStart() {
-  appendDebugLog('start button clicked', { currentProjectEnabled, running });
-
-  // Check if there's a current project
+async function handleStart(options = {}) {
+  const { projectId = null } = options;
   const currentProject = projectManager?.getCurrentProject();
-  if (!currentProject) {
+  const targetProjectId = projectId || currentProject?.id || null;
+
+  appendDebugLog('start button clicked', {
+    project_id: targetProjectId,
+    currentProjectEnabled,
+    running_count: runningProjectIds.size
+  });
+
+  if (!currentProject || !targetProjectId || currentProject.id !== targetProjectId) {
     alert('请先选择一个项目');
     return;
   }
@@ -643,18 +864,17 @@ async function handleStart() {
     alert('当前项目未启用，请先启用当前项目');
     return;
   }
+  if (isProjectRunning(targetProjectId)) {
+    appendDebugLog('start skipped because project already running', { project_id: targetProjectId });
+    return;
+  }
 
   // Ensure latest right-side edits are persisted before run.
   await flushProjectAutoSave('before-start', { force: true });
 
-  if (terminalComponent && terminalComponent.isInitialized()) {
-    terminalComponent.clear();
-  } else {
-    terminalOutput.textContent = '';
-  }
-
-  appendTerminalOutput('\r\n[system] starting loop process...\r\n');
-  running = true;
+  terminalHistoryByProject.set(targetProjectId, '');
+  renderSelectedProjectTerminalHistory(currentProject);
+  appendProjectTerminalOutput(targetProjectId, '\r\n[system] starting loop process...\r\n');
   syncUI();
   workDirInput.disabled = true;
   promptInput.disabled = true;
@@ -686,6 +906,7 @@ async function handleStart() {
 
   try {
     await invokeWithDebug('start_loop', {
+      project_id: targetProjectId,
       work_dir: workDir,
       prompt,
       max_iterations: maxIterations,
@@ -701,7 +922,6 @@ async function handleStart() {
   } catch (err) {
     appendDebugLog('start failed', err);
     alert(`Start failed: ${serializeDebugValue(err)}`);
-    running = false;
     syncUI();
     workDirInput.disabled = false;
     promptInput.disabled = false;
@@ -713,9 +933,28 @@ async function handleStart() {
 /**
  * Handles stop button clicks.
  */
-async function handleStop() {
-  appendDebugLog('stop button clicked', { currentProjectEnabled, running });
-  running = false;
+async function handleStop(options = {}) {
+  const { projectId = null, sessionId = null } = options;
+  const currentProject = projectManager?.getCurrentProject();
+  const targetSession = sessionId
+    ? getRunningSessionById(sessionId)
+    : getRunningSessionByProject(projectId || currentProject?.id || null);
+  const targetProjectId = targetSession?.project_id || projectId || currentProject?.id || null;
+  if (!targetProjectId && !targetSession) {
+    return;
+  }
+
+  appendDebugLog('stop button clicked', {
+    project_id: targetProjectId,
+    currentProjectEnabled,
+    running_count: runningProjectIds.size
+  });
+
+  if (targetProjectId && !isProjectRunning(targetProjectId) && !targetSession) {
+    appendDebugLog('stop skipped because project not running', { project_id: targetProjectId });
+    return;
+  }
+
   syncUI();
   workDirInput.disabled = false;
   promptInput.disabled = false;
@@ -723,9 +962,19 @@ async function handleStop() {
   completionPromiseInput.disabled = false;
 
   try {
-    await invokeWithDebug('stop_loop');
+    await invokeWithDebug('stop_loop', {
+      project_id: targetProjectId,
+      session_id: targetSession?.session_id || sessionId || null
+    });
     await refreshBackendDebugState();
-    await pollLoopOutput();
+    if (currentProject && currentProject.id === targetProjectId) {
+      await pollCurrentProjectOutput();
+    } else if (targetProjectId) {
+      const chunks = await invoke('poll_loop_output', { project_id: targetProjectId });
+      if (Array.isArray(chunks) && chunks.length > 0) {
+        chunks.forEach((chunk) => appendProjectTerminalOutput(targetProjectId, String(chunk)));
+      }
+    }
   } catch (err) {
     appendDebugLog('stop failed', err);
     alert(`Stop failed: ${serializeDebugValue(err)}`);
@@ -740,10 +989,15 @@ async function handleSendInput() {
   if (!text.trim()) {
     return;
   }
+  const currentProject = getCurrentProject();
+  if (!currentProject || !isProjectRunning(currentProject.id)) {
+    return;
+  }
 
   try {
-    await sendLoopInput(text + '\n'); // Add newline for form input
-    appendTerminalOutput(`\r\n[user] ${text}\r\n`);
+    const runningSession = getRunningSessionByProject(currentProject.id);
+    await sendLoopInput(text + '\n', currentProject.id, runningSession?.session_id || null); // Add newline for form input
+    appendProjectTerminalOutput(currentProject.id, `\r\n[user] ${text}\r\n`);
     terminalInput.value = '';
   } catch (err) {
     appendDebugLog('send input failed', err);
