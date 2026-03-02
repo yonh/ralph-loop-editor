@@ -129,6 +129,31 @@
       overflow-y: auto;
       padding: 16px;
     }
+    .sidebar-footer {
+      border-top: 1px solid #e2e8f0;
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      justify-content: flex-start;
+    }
+    .sidebar-gear-btn {
+      width: 38px;
+      height: 38px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      background: #f8fafc;
+      color: #334155;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .sidebar-gear-btn:hover {
+      border-color: #a5b4fc;
+      background: #eef2ff;
+      color: #1e3a8a;
+    }
     
     .project-item {
       background: white;
@@ -380,6 +405,37 @@
       border-color: #a5b4fc;
       color: #1e3a8a;
     }
+    .prompt-editor-wrap {
+      position: relative;
+    }
+    .prompt-editor-wrap textarea {
+      min-height: 138px;
+      padding-bottom: 42px;
+    }
+    .prompt-ai-optimize-btn {
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      border: 1px solid #93c5fd;
+      background: #eff6ff;
+      color: #1d4ed8;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      line-height: 1.1;
+      padding: 6px 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .prompt-ai-optimize-btn:hover {
+      background: #dbeafe;
+      border-color: #60a5fa;
+      color: #1e3a8a;
+    }
     label {
       display: block;
       font-weight: 600;
@@ -519,7 +575,7 @@
       display: flex;
       gap: 12px;
       justify-content: center;
-      margin-top: 20px;
+      /* margin-top: 20px; */
     }
     .running-sessions {
       margin-top: 12px;
@@ -747,6 +803,9 @@
       overflow-y: auto;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
     }
+    .modal-content.wide {
+      max-width: 760px;
+    }
     
     .modal-header {
       display: flex;
@@ -855,6 +914,73 @@
       color: #1e3a8a;
       white-space: pre-wrap;
     }
+    .app-settings-grid {
+      display: grid;
+      gap: 10px;
+    }
+    .app-settings-section {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      background: #f8fafc;
+      padding: 10px;
+    }
+    .app-settings-title {
+      font-size: 0.84rem;
+      font-weight: 700;
+      color: #1e293b;
+      margin-bottom: 8px;
+    }
+    .app-settings-hint {
+      margin-top: 6px;
+      font-size: 0.75rem;
+      color: #64748b;
+      line-height: 1.45;
+    }
+    .app-settings-inline-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 8px;
+    }
+    .app-settings-inline-actions button {
+      padding: 8px 12px;
+      font-size: 0.82rem;
+      border-radius: 8px;
+      border: none;
+      background: #0ea5e9;
+      color: #fff;
+      cursor: pointer;
+    }
+    .app-settings-inline-actions button:hover {
+      background: #0284c7;
+    }
+    .task-plan-summary {
+      border: 1px solid #dbeafe;
+      background: #eff6ff;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      color: #1e3a8a;
+      font-size: 0.84rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .task-plan-list {
+      margin: 0;
+      padding-left: 18px;
+      color: #1f2937;
+      font-size: 0.86rem;
+      line-height: 1.6;
+    }
+    .task-plan-list li + li {
+      margin-top: 5px;
+    }
+    .task-plan-note {
+      margin-top: 10px;
+      font-size: 0.76rem;
+      color: #64748b;
+      line-height: 1.45;
+    }
 
     .delete-confirm-text {
       color: #334155;
@@ -907,6 +1033,12 @@
     .controls button [data-lucide], .controls button .lucide, .controls button svg.lucide,
     #send-btn [data-lucide], #send-btn .lucide, #send-btn svg.lucide {
       margin-right: 8px;
+    }
+    .sidebar-gear-btn [data-lucide], .sidebar-gear-btn .lucide, .sidebar-gear-btn svg.lucide,
+    .prompt-ai-optimize-btn [data-lucide], .prompt-ai-optimize-btn .lucide, .prompt-ai-optimize-btn svg.lucide {
+      width: 15px;
+      height: 15px;
+      margin-right: 0;
     }
     
     /* Project card header with toggle switch */
@@ -987,9 +1119,44 @@
     .toggle-switch input:checked + .toggle-track::after {
       transform: translateX(16px);
     }
+
+    .app-toast {
+      position: fixed;
+      top: 14px;
+      left: 50%;
+      transform: translate(-50%, -18px);
+      min-width: 280px;
+      max-width: min(780px, calc(100vw - 24px));
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #fecaca;
+      background: #fff1f2;
+      color: #9f1239;
+      font-size: 0.9rem;
+      line-height: 1.4;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.2);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      z-index: 1200;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .app-toast.show {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+
+    .app-toast.success {
+      border-color: #86efac;
+      background: #ecfdf5;
+      color: #166534;
+    }
   </style>
 </head>
 <body>
+  <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
   <!-- <h1>Ralph Loop Editor</h1> -->
   <div class="container">
     <!-- Sidebar -->
@@ -1007,12 +1174,15 @@
       <div class="project-list" id="project-list">
         <!-- Projects will be rendered here -->
       </div>
+      <div class="sidebar-footer">
+        <button type="button" class="sidebar-gear-btn" id="app-settings-btn" title="全局设置">
+          <i data-lucide="settings"></i>
+        </button>
+      </div>
     </div>
 
     <!-- Main Content -->
     <div class="main-content">
-      <div class="status disabled" id="status">状态: 未选择项目</div>
-
     <input type="hidden" id="work-dir">
 
     <div class="form-group">
@@ -1020,11 +1190,16 @@
         <label for="prompt">任务提示词</label>
         <button type="button" class="prompt-guide-btn" id="prompt-guide-btn">更多详情</button>
       </div>
-      <textarea id="prompt" placeholder="目标：一句话说明要实现什么
+      <div class="prompt-editor-wrap">
+        <textarea id="prompt" placeholder="目标：一句话说明要实现什么
 完成标准：列出可验证结果（接口、测试、文档）
 过程要求：失败就定位并修复，直到通过
 结束输出：输出 <promise>阶段工作结束</promise>
 建议：任务越具体，循环越稳定"></textarea>
+        <button type="button" class="prompt-ai-optimize-btn" id="prompt-ai-optimize-btn">
+          <i data-lucide="wand-sparkles"></i> AI 优化
+        </button>
+      </div>
     </div>
 
      <div class="form-group">
@@ -1090,6 +1265,87 @@
           <pre id="debug-log"></pre>
         </div>
       </section>
+    </div>
+  </div>
+
+  <!-- App Settings Modal -->
+  <div class="modal hidden" id="app-settings-modal">
+    <div class="modal-content wide">
+      <div class="modal-header">
+        <h2 class="modal-title">全局设置</h2>
+        <button class="modal-close-btn" id="app-settings-close-btn" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body app-settings-grid">
+        <div class="app-settings-section">
+          <div class="app-settings-title">默认任务参数</div>
+          <div class="form-group">
+            <label for="app-default-max-iterations">默认轮次</label>
+            <input type="number" id="app-default-max-iterations" min="1" max="100" step="1" placeholder="20">
+          </div>
+          <div class="form-group">
+            <label for="app-default-claude-setting">默认大模型参数配置（Claude Setting）</label>
+            <select id="app-default-claude-setting">
+              <option value="">不指定（保持项目配置）</option>
+            </select>
+            <div class="app-settings-hint">当项目没有绑定 Claude Setting 时，启动前会自动应用此默认配置。</div>
+          </div>
+        </div>
+        <div class="app-settings-section">
+          <div class="app-settings-title">默认提示词与 AI 优化预设</div>
+          <div class="form-group">
+            <label for="app-default-prompt">默认提示词</label>
+            <textarea id="app-default-prompt" placeholder="这里填写默认提示词；项目提示词为空时自动使用。"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="app-optimize-provider">AI 优化接口提供方</label>
+            <select id="app-optimize-provider">
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="app-optimize-base-url">AI 优化接口地址（可选）</label>
+            <input type="text" id="app-optimize-base-url" placeholder="留空使用官方默认地址">
+          </div>
+          <div class="form-group">
+            <label for="app-optimize-model">AI 优化模型</label>
+            <input type="text" id="app-optimize-model" placeholder="例如：claude-sonnet-4-5 / gpt-4o-mini">
+          </div>
+          <div class="form-group">
+            <label for="app-optimize-api-key">AI 优化 API Key</label>
+            <input type="password" id="app-optimize-api-key" placeholder="例如：sk-xxx">
+            <div class="app-settings-hint">仅用于“AI 优化提示词”功能，保存在本地设置中。</div>
+          </div>
+          <div class="form-group">
+            <label for="app-optimize-preset">AI 优化预设（支持 {{input_prompt}} 变量）</label>
+            <textarea id="app-optimize-preset" class="setting-editor" placeholder="例如：将 {{input_prompt}} 改写成可执行提示词，先给任务列表再执行。"></textarea>
+            <div class="app-settings-hint">点击“AI 优化”按钮时，会使用这里的预设模板重写当前提示词。</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" id="app-settings-cancel-btn">取消</button>
+        <button type="button" class="modal-save-btn" id="app-settings-save-btn">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task Plan Modal -->
+  <div class="modal hidden" id="task-plan-modal">
+    <div class="modal-content wide">
+      <div class="modal-header">
+        <h2 class="modal-title">开始前任务列表</h2>
+        <button class="modal-close-btn" id="task-plan-close-btn" aria-label="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="task-plan-summary" id="task-plan-summary">正在生成任务列表...</div>
+        <ol class="task-plan-list" id="task-plan-list"></ol>
+        <div class="task-plan-note">确认后会把上述“详细任务列表”注入提示词，再启动循环。</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="modal-cancel-btn" id="task-plan-cancel-btn">返回修改</button>
+        <button type="button" class="modal-save-btn" id="task-plan-confirm-btn">确认开始</button>
+      </div>
     </div>
   </div>
 
@@ -1198,6 +1454,30 @@
         <button class="modal-close-btn" id="claude-settings-close-btn" aria-label="关闭">×</button>
       </div>
       <div class="modal-body">
+        <div class="form-group">
+          <label>快速大模型配置（保存为 Claude Setting）</label>
+          <div class="hint">用于快速生成 setting JSON 并保存到下方列表。</div>
+        </div>
+        <div class="form-group">
+          <label for="claude-quick-config-name">配置名称</label>
+          <input type="text" id="claude-quick-config-name" placeholder="例如: glm-4.7-default">
+        </div>
+        <div class="form-group">
+          <label for="claude-quick-model">模型标识（model）</label>
+          <input type="text" id="claude-quick-model" placeholder="例如: glm-4.7">
+        </div>
+        <div class="form-group">
+          <label for="claude-quick-base-url">接口地址（ANTHROPIC_BASE_URL，可选）</label>
+          <input type="text" id="claude-quick-base-url" placeholder="例如: https://api.example.com/v1">
+        </div>
+        <div class="form-group">
+          <label for="claude-quick-auth-token">访问令牌（ANTHROPIC_AUTH_TOKEN，可选）</label>
+          <input type="text" id="claude-quick-auth-token" placeholder="例如: sk-xxx">
+        </div>
+        <div class="app-settings-inline-actions">
+          <button type="button" id="claude-quick-save-btn">保存为 Claude Setting</button>
+        </div>
+        <div class="divider"></div>
         <div class="form-group">
           <label for="claude-settings-name">Setting 名称</label>
           <input type="text" id="claude-settings-name" placeholder="例如: glm-4.7-dev">

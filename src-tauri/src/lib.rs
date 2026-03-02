@@ -6,11 +6,14 @@ use std::sync::{Mutex, LazyLock};
 use std::thread;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use dirs::home_dir;
 use tokio::fs;
+use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::time::{timeout, Duration as TokioDuration};
 
 /// Runtime session for one active loop process.
 struct LoopSession {
@@ -228,6 +231,77 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+/// Compresses process output into one short single-line preview for errors.
+fn compact_process_output(bytes: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(bytes).replace('\n', " ").trim().to_string();
+    if raw.len() > 240 {
+        format!("{}...", &raw[..240])
+    } else {
+        raw
+    }
+}
+
+fn extract_openai_text(response_json: &Value) -> Option<String> {
+    let content = response_json
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))?;
+
+    if let Some(text) = content.as_str() {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(items) = content.as_array() {
+        let mut merged = String::new();
+        for item in items {
+            if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
+                if !text.is_empty() {
+                    if !merged.is_empty() {
+                        merged.push('\n');
+                    }
+                    merged.push_str(text);
+                }
+            }
+        }
+        let trimmed = merged.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_anthropic_text(response_json: &Value) -> Option<String> {
+    let content = response_json.get("content")?.as_array()?;
+    let mut merged = String::new();
+    for item in content {
+        if item.get("type").and_then(|value| value.as_str()) != Some("text") {
+            continue;
+        }
+        if let Some(text) = item.get("text").and_then(|value| value.as_str()) {
+            if !text.is_empty() {
+                if !merged.is_empty() {
+                    merged.push('\n');
+                }
+                merged.push_str(text);
+            }
+        }
+    }
+
+    let trimmed = merged.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Converts a setting display name into a filesystem-safe file stem.
@@ -756,6 +830,235 @@ async fn inspect_claude_runtime_context(work_dir: String) -> Result<ClaudeRuntim
     }
 
     Ok(context)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Optimizes prompt by direct HTTP API call (OpenAI/Anthropic).
+async fn optimize_prompt_api(
+    provider: String,
+    api_key: String,
+    base_url: Option<String>,
+    model: String,
+    prompt: String,
+    timeout_seconds: Option<u64>,
+) -> Result<String, String> {
+    let provider = provider.trim().to_lowercase();
+    if provider != "openai" && provider != "anthropic" {
+        return Err(format!("不支持的 provider: {}，仅支持 openai/anthropic", provider));
+    }
+
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("AI 优化 API Key 不能为空".to_string());
+    }
+
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return Err("AI 优化模型不能为空".to_string());
+    }
+
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("优化提示词不能为空".to_string());
+    }
+
+    let normalized_base = base_url
+        .as_deref()
+        .map(|raw| raw.trim())
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(|trimmed| trimmed.trim_end_matches('/').to_string());
+
+    let endpoint = if provider == "openai" {
+        let base = normalized_base.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        if base.ends_with("/chat/completions") {
+            base
+        } else if base.ends_with("/v1") {
+            format!("{}/chat/completions", base)
+        } else {
+            format!("{}/v1/chat/completions", base)
+        }
+    } else {
+        let base = normalized_base.unwrap_or_else(|| "https://api.anthropic.com/v1".to_string());
+        if base.ends_with("/messages") {
+            base
+        } else if base.ends_with("/v1") {
+            format!("{}/messages", base)
+        } else {
+            format!("{}/v1/messages", base)
+        }
+    };
+
+    let timeout_seconds = timeout_seconds.unwrap_or(30).clamp(5, 120);
+    let client = reqwest::Client::builder()
+        .timeout(TokioDuration::from_secs(timeout_seconds))
+        .build()
+        .map_err(|err| format!("创建 HTTP 客户端失败: {}", err))?;
+
+    let request = if provider == "openai" {
+        client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0.2
+            }))
+    } else {
+        client
+            .post(&endpoint)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "model": model,
+                "max_tokens": 2048,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            }))
+    };
+
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("调用 {} 接口失败: {}", provider, err))?;
+
+    let status = response.status();
+    let raw_body = response
+        .text()
+        .await
+        .map_err(|err| format!("读取 {} 响应失败: {}", provider, err))?;
+
+    if !status.is_success() {
+        let parsed = serde_json::from_str::<Value>(&raw_body).ok();
+        if let Some(message) = parsed
+            .as_ref()
+            .and_then(|json| json.get("error"))
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+        {
+            return Err(format!("{} 接口返回错误({}): {}", provider, status.as_u16(), message));
+        }
+        if let Some(message) = parsed
+            .as_ref()
+            .and_then(|json| json.get("msg"))
+            .and_then(|message| message.as_str())
+        {
+            let code = parsed
+                .as_ref()
+                .and_then(|json| json.get("code"))
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            return Err(format!(
+                "{} 接口返回错误({}): code={}, msg={}",
+                provider,
+                status.as_u16(),
+                code,
+                message
+            ));
+        }
+        return Err(format!(
+            "{} 接口返回错误({}): {}",
+            provider,
+            status.as_u16(),
+            compact_process_output(raw_body.as_bytes())
+        ));
+    }
+
+    let response_json = serde_json::from_str::<Value>(&raw_body)
+        .map_err(|err| format!("解析 {} 响应 JSON 失败: {}", provider, err))?;
+
+    let text = if provider == "openai" {
+        extract_openai_text(&response_json)
+    } else {
+        extract_anthropic_text(&response_json)
+    };
+
+    if text.is_none() {
+        if let Some(message) = response_json
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+        {
+            return Err(format!("{} 接口返回错误: {}", provider, message));
+        }
+        if let Some(message) = response_json
+            .get("msg")
+            .and_then(|message| message.as_str())
+        {
+            let code = response_json
+                .get("code")
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            return Err(format!("{} 接口返回错误: code={}, msg={}", provider, code, message));
+        }
+    }
+
+    match text {
+        Some(value) => Ok(value),
+        None => Err(format!(
+            "{} 接口返回成功但未包含可解析文本: {}",
+            provider,
+            compact_process_output(raw_body.as_bytes())
+        )),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Uses local Claude CLI to optimize one prompt in non-interactive mode.
+async fn optimize_prompt(work_dir: Option<String>, prompt: String) -> Result<String, String> {
+    let normalized_prompt = prompt.trim().to_string();
+    if normalized_prompt.is_empty() {
+        return Err("优化提示词不能为空".to_string());
+    }
+
+    let resolved_work_dir = work_dir
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+    if !Path::new(&resolved_work_dir).exists() {
+        return Err(format!("工作目录不存在: {}", resolved_work_dir));
+    }
+
+    let args = vec!["--dangerously-skip-permissions", "-p"];
+    let output = timeout(
+        TokioDuration::from_secs(30),
+        Command::new("claude")
+            .args(&args)
+            .arg(&normalized_prompt)
+            .current_dir(&resolved_work_dir)
+            .output()
+    )
+    .await;
+
+    match output {
+        Ok(wait_result) => match wait_result {
+            Ok(result) => {
+                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                if result.status.success() && !stdout.is_empty() {
+                    return Ok(stdout);
+                }
+                Err(format!(
+                    "调用 Claude 优化失败。args={:?}, code={:?}, stdout='{}', stderr='{}'",
+                    args,
+                    result.status.code(),
+                    compact_process_output(&result.stdout),
+                    compact_process_output(&result.stderr)
+                ))
+            }
+            Err(err) => Err(format!("调用 Claude 优化失败。args={:?}, error={}", args, err)),
+        },
+        Err(_elapsed) => Err("调用 Claude 优化超时（30s）".to_string()),
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1369,7 +1672,7 @@ async fn update_claude_settings_file(
 }
 
 #[tauri::command(rename_all = "snake_case")]
-/// Delete one Claude setting file, blocked when referenced by projects.
+/// Delete one Claude setting file, and auto-detach it from referenced projects.
 async fn delete_claude_settings_file(setting_id: String) -> Result<String, String> {
     let mut state = PROJECT_STATE.lock().await;
 
@@ -1383,15 +1686,7 @@ async fn delete_claude_settings_file(setting_id: String) -> Result<String, Strin
         return Err("setting_id 不能为空".to_string());
     }
 
-    let referenced_count = state
-        .config
-        .projects
-        .values()
-        .filter(|project| project.claude_setting_id.as_deref() == Some(normalized_id.as_str()))
-        .count();
-    if referenced_count > 0 {
-        return Err(format!("该 setting 正在被 {} 个项目使用，不能删除", referenced_count));
-    }
+    let previous_projects = state.config.projects.clone();
 
     let removed = state
         .config
@@ -1399,12 +1694,34 @@ async fn delete_claude_settings_file(setting_id: String) -> Result<String, Strin
         .remove(&normalized_id)
         .ok_or_else(|| format!("Claude setting 文件不存在: {}", normalized_id))?;
 
+    let referenced_count = state
+        .config
+        .projects
+        .values()
+        .filter(|project| project.claude_setting_id.as_deref() == Some(normalized_id.as_str()))
+        .count();
+    if referenced_count > 0 {
+        let now = Utc::now();
+        state.config.projects.values_mut().for_each(|project| {
+            if project.claude_setting_id.as_deref() == Some(normalized_id.as_str()) {
+                project.claude_setting_id = None;
+                project.updated_at = now;
+            }
+        });
+        log::info!(
+            "[delete_claude_settings_file] auto-detached setting={} from {} projects",
+            normalized_id,
+            referenced_count
+        );
+    }
+
     if let Err(err) = fs::remove_file(&removed.file_path).await {
         if err.kind() != std::io::ErrorKind::NotFound {
             state
                 .config
                 .claude_settings
                 .insert(normalized_id, removed.clone());
+            state.config.projects = previous_projects;
             return Err(format!("删除 setting 文件失败 '{}': {}", removed.file_path, err));
         }
     }
@@ -1414,6 +1731,7 @@ async fn delete_claude_settings_file(setting_id: String) -> Result<String, Strin
             .config
             .claude_settings
             .insert(removed.id.clone(), removed);
+        state.config.projects = previous_projects;
         log::error!("[delete_claude_settings_file] failed to save config: {}", err);
         return Err(err);
     }
@@ -1679,6 +1997,8 @@ pub fn run() {
             resize_pty,
             poll_loop_output,
             inspect_claude_runtime_context,
+            optimize_prompt,
+            optimize_prompt_api,
             get_project_enabled,
             set_project_enabled,
             get_runtime_debug_state,

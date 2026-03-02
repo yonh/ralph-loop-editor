@@ -29,8 +29,10 @@ export class ProjectManager {
     this.onProjectsUpdate = null;
     this.onProjectRun = null;
     this.onProjectToggle = null; // callback(projectId, newEnabled)
+    this.onClaudeSettingsChange = null;
     this.pendingDeleteProject = null;
     this.isDeletingProject = false;
+    this.deletingClaudeSettingIds = new Set();
 
     // Lucide icons map
     this.icons = {
@@ -98,7 +100,12 @@ export class ProjectManager {
       settingsModalSaveBtn: document.getElementById('claude-settings-save-btn'),
       settingsNameInput: document.getElementById('claude-settings-name'),
       settingsContentInput: document.getElementById('claude-settings-content'),
-      settingsList: document.getElementById('claude-settings-list')
+      settingsList: document.getElementById('claude-settings-list'),
+      settingsQuickConfigNameInput: document.getElementById('claude-quick-config-name'),
+      settingsQuickModelInput: document.getElementById('claude-quick-model'),
+      settingsQuickBaseUrlInput: document.getElementById('claude-quick-base-url'),
+      settingsQuickAuthTokenInput: document.getElementById('claude-quick-auth-token'),
+      settingsQuickSaveBtn: document.getElementById('claude-quick-save-btn')
     };
 
     this.settingsModalReturnToProject = false;
@@ -197,6 +204,12 @@ export class ProjectManager {
       });
     }
 
+    if (elements.settingsQuickSaveBtn) {
+      elements.settingsQuickSaveBtn.addEventListener('click', () => {
+        void this.handleSaveQuickModelConfigFromModal();
+      });
+    }
+
     if (elements.settingsModalCancelBtn) {
       elements.settingsModalCancelBtn.addEventListener('click', () => this.hideClaudeSettingsModal());
     }
@@ -236,6 +249,9 @@ export class ProjectManager {
       }
       this.renderClaudeSettingOptions(selectedSettingId);
       this.renderClaudeSettingsList();
+      if (this.onClaudeSettingsChange) {
+        this.onClaudeSettingsChange(this.claudeSettings);
+      }
       if (refreshProjectList) {
         this.renderProjectList();
       }
@@ -307,7 +323,9 @@ export class ProjectManager {
       deleteButton.className = 'setting-list-delete-btn';
       deleteButton.textContent = '删除';
       deleteButton.addEventListener('click', (event) => {
+        event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         void this.handleDeleteClaudeSetting(setting);
       });
 
@@ -414,15 +432,21 @@ export class ProjectManager {
    * Deletes one Claude setting after confirmation.
    */
   async handleDeleteClaudeSetting(setting) {
-    const shouldDelete = confirm(`确认删除 setting "${setting.name}" 吗？`);
+    if (!setting?.id || this.deletingClaudeSettingIds.has(setting.id)) {
+      return;
+    }
+    const shouldDelete = await this.requestConfirm(`确认删除 setting "${setting.name}" 吗？`);
     if (!shouldDelete) {
       return;
     }
+    this.deletingClaudeSettingIds.add(setting.id);
     try {
       await this.invoke('delete_claude_settings_file', { setting_id: setting.id });
       const previousSelectedId = this.elements.projectClaudeSettingSelect?.value || '';
       const nextSelectedId = previousSelectedId === setting.id ? '' : previousSelectedId;
       await this.loadClaudeSettings(nextSelectedId, { refreshProjectList: true });
+      await this.loadProjects();
+      await this.loadCurrentProject();
       if (this.editingClaudeSettingId === setting.id) {
         this.resetClaudeSettingsEditor();
       }
@@ -430,6 +454,202 @@ export class ProjectManager {
     } catch (error) {
       console.error('[ProjectManager] failed to delete setting file:', error);
       this.showError('删除 setting 文件失败: ' + error);
+    } finally {
+      this.deletingClaudeSettingIds.delete(setting.id);
+    }
+  }
+
+  async requestConfirm(message) {
+    const promptText = String(message || '').trim() || '确认继续吗？';
+
+    try {
+      const hasTauriRuntime = Boolean(
+        typeof window !== 'undefined' && (window.__TAURI__ || window.__TAURI_INTERNALS__)
+      );
+      if (!hasTauriRuntime && typeof window !== 'undefined' && typeof window.confirm === 'function') {
+        return window.confirm(promptText);
+      }
+    } catch (error) {
+      console.warn('[ProjectManager] window.confirm unavailable, fallback to custom confirm:', error);
+    }
+
+    if (typeof document === 'undefined' || !document.body) {
+      return true;
+    }
+
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.style.position = 'fixed';
+      overlay.style.inset = '0';
+      overlay.style.background = 'rgba(15, 23, 42, 0.45)';
+      overlay.style.display = 'flex';
+      overlay.style.alignItems = 'center';
+      overlay.style.justifyContent = 'center';
+      overlay.style.zIndex = '99999';
+
+      const panel = document.createElement('div');
+      panel.style.width = 'min(420px, calc(100vw - 24px))';
+      panel.style.background = '#ffffff';
+      panel.style.borderRadius = '12px';
+      panel.style.boxShadow = '0 20px 40px rgba(15, 23, 42, 0.25)';
+      panel.style.padding = '16px';
+      panel.style.color = '#0f172a';
+
+      const text = document.createElement('div');
+      text.textContent = promptText;
+      text.style.fontSize = '14px';
+      text.style.lineHeight = '1.5';
+      text.style.marginBottom = '14px';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.justifyContent = 'flex-end';
+      actions.style.gap = '8px';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.textContent = '取消';
+      cancelBtn.style.border = '1px solid #cbd5e1';
+      cancelBtn.style.background = '#ffffff';
+      cancelBtn.style.color = '#334155';
+      cancelBtn.style.padding = '6px 12px';
+      cancelBtn.style.borderRadius = '8px';
+      cancelBtn.style.cursor = 'pointer';
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.type = 'button';
+      confirmBtn.textContent = '确认';
+      confirmBtn.style.border = 'none';
+      confirmBtn.style.background = '#ef4444';
+      confirmBtn.style.color = '#ffffff';
+      confirmBtn.style.padding = '6px 12px';
+      confirmBtn.style.borderRadius = '8px';
+      confirmBtn.style.cursor = 'pointer';
+
+      const cleanup = (result) => {
+        document.removeEventListener('keydown', onKeyDown);
+        overlay.remove();
+        resolve(result);
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') {
+          cleanup(false);
+        }
+      };
+
+      cancelBtn.addEventListener('click', () => cleanup(false));
+      confirmBtn.addEventListener('click', () => cleanup(true));
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+          cleanup(false);
+        }
+      });
+      document.addEventListener('keydown', onKeyDown);
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(confirmBtn);
+      panel.appendChild(text);
+      panel.appendChild(actions);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+      confirmBtn.focus();
+    });
+  }
+
+  buildClaudeSettingContentFromQuickModel() {
+    const model = String(this.elements.settingsQuickModelInput?.value || '').trim();
+    const baseUrl = String(this.elements.settingsQuickBaseUrlInput?.value || '').trim();
+    const authToken = String(this.elements.settingsQuickAuthTokenInput?.value || '').trim();
+    const setting = {
+      env: {
+        ANTHROPIC_AUTH_TOKEN: authToken,
+        ANTHROPIC_BASE_URL: baseUrl,
+        ANTHROPIC_MODEL: model
+      },
+      permissions: {
+        allow: []
+      },
+      model,
+      enabledPlugins: {},
+      skipDangerousModePermissionPrompt: true
+    };
+    return JSON.stringify(setting, null, 2);
+  }
+
+  async handleSaveQuickModelConfigFromModal() {
+    const {
+      settingsQuickConfigNameInput,
+      settingsQuickModelInput,
+      settingsQuickSaveBtn,
+      settingsNameInput,
+      settingsContentInput
+    } = this.elements;
+    const configName = String(settingsQuickConfigNameInput?.value || '').trim();
+    const model = String(settingsQuickModelInput?.value || '').trim();
+
+    if (!configName) {
+      this.showError('请先输入配置名称');
+      return;
+    }
+    if (!model) {
+      this.showError('请先输入模型标识（model）');
+      return;
+    }
+
+    const content = this.buildClaudeSettingContentFromQuickModel();
+    if (settingsQuickSaveBtn) {
+      settingsQuickSaveBtn.disabled = true;
+      settingsQuickSaveBtn.textContent = '保存中...';
+    }
+
+    try {
+      let setting = null;
+      try {
+        setting = await this.invoke('create_claude_settings_file', {
+          name: configName,
+          content,
+          overwrite: false
+        });
+      } catch (error) {
+        const message = String(error || '');
+        if (!message.includes('已存在同名 setting 文件')) {
+          throw error;
+        }
+        const shouldOverwrite = await this.requestConfirm(`配置 "${configName}" 已存在，是否覆盖？`);
+        if (!shouldOverwrite) {
+          return;
+        }
+        setting = await this.invoke('create_claude_settings_file', {
+          name: configName,
+          content,
+          overwrite: true
+        });
+      }
+
+      if (!setting?.id) {
+        throw new Error('保存配置失败：返回结果为空');
+      }
+
+      await this.loadClaudeSettings(setting.id, { refreshProjectList: true });
+      this.editingClaudeSettingId = setting.id;
+      if (settingsNameInput) {
+        settingsNameInput.value = setting.name || configName;
+      }
+      if (settingsContentInput) {
+        settingsContentInput.value = content;
+      }
+      this.syncSettingsModalSaveButtonLabel();
+      this.renderClaudeSettingsList();
+      this.showSuccess(`大模型配置已保存为 "${setting.name}"`);
+    } catch (error) {
+      console.error('[ProjectManager] failed to save quick model config:', error);
+      this.showError('保存大模型配置失败: ' + error);
+    } finally {
+      if (settingsQuickSaveBtn) {
+        settingsQuickSaveBtn.disabled = false;
+        settingsQuickSaveBtn.textContent = '保存为 Claude Setting';
+      }
     }
   }
 
@@ -480,7 +700,7 @@ export class ProjectManager {
     } catch (error) {
       const message = String(error || '');
       if (!this.editingClaudeSettingId && message.includes('已存在同名 setting 文件')) {
-        const shouldOverwrite = confirm(`setting "${name}" 已存在，是否覆盖？`);
+        const shouldOverwrite = await this.requestConfirm(`setting "${name}" 已存在，是否覆盖？`);
         if (!shouldOverwrite) {
           return;
         }

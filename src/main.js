@@ -3,7 +3,23 @@
  * Integrates xterm.js terminal component with Tauri backend
  */
 
-import { createIcons, Play, Pause, Square, ToggleLeft, ToggleRight, Plus, X, Terminal, Bug, Send, Edit2, Trash2 } from 'lucide';
+import {
+  createIcons,
+  Play,
+  Pause,
+  Square,
+  ToggleLeft,
+  ToggleRight,
+  Plus,
+  X,
+  Terminal,
+  Bug,
+  Send,
+  Edit2,
+  Trash2,
+  Settings,
+  WandSparkles
+} from 'lucide';
 import { TerminalComponent } from './js/terminal.js';
 import { ProjectManager } from './js/project-manager.js';
 
@@ -19,7 +35,9 @@ const icons = {
   Bug,
   Send,
   Edit2,
-  Trash2
+  Trash2,
+  Settings,
+  WandSparkles
 };
 let invoke = null;
 let terminalComponent = null;
@@ -53,11 +71,233 @@ const DEFAULT_AUTO_IDLE_NEXT_LOOP_MS = 45_000;
 const DEFAULT_AUTO_HARD_STOP_MS = 15 * 60 * 1000;
 const IDLE_NEXT_TIMEOUT_STORAGE_KEY = 'ralph_loop_idle_next_timeout_ms';
 const HARD_STOP_TIMEOUT_STORAGE_KEY = 'ralph_loop_hard_stop_timeout_ms';
+const APP_UI_SETTINGS_STORAGE_KEY = 'ralph_loop_ui_settings_v1';
+const TASK_PLAN_START_MARKER = '### 详细任务列表（自动生成）';
+const TASK_PLAN_END_MARKER = '### 任务列表结束';
+const DEFAULT_PROMPT_OPTIMIZE_PRESET = `请将以下任务目标改写为可执行的工程提示词，并确保包含详细任务列表与验收要求。
+任务目标：
+{{input_prompt}}
+
+输出要求：
+1. 先给出分阶段的详细任务列表（每步可验证）
+2. 失败时必须定位原因并修复后重试
+3. 输出变更摘要、测试结果、风险与下一步建议`;
+const DEFAULT_APP_UI_SETTINGS = Object.freeze({
+  defaultPrompt: '',
+  defaultMaxIterations: 20,
+  defaultClaudeSettingId: '',
+  optimizePreset: DEFAULT_PROMPT_OPTIMIZE_PRESET,
+  optimizeProvider: 'anthropic',
+  optimizeBaseUrl: '',
+  optimizeModel: 'claude-sonnet-4-5',
+  optimizeApiKey: ''
+});
 const TERMINAL_FOCUS_CONTROL_SEQUENCES = new Set(['\u001b[I', '\u001b[O']);
 const terminalHistoryByProject = new Map();
 let autoIdleNextLoopMs = DEFAULT_AUTO_IDLE_NEXT_LOOP_MS;
 let autoHardStopMs = DEFAULT_AUTO_HARD_STOP_MS;
 let runtimeCountdownTimer = null;
+let appUISettings = { ...DEFAULT_APP_UI_SETTINGS };
+let taskPlanModalResolver = null;
+let toastHideTimer = null;
+
+function replaceTemplateToken(template, token, value) {
+  return String(template || '').split(token).join(value);
+}
+
+function normalizeAppUISettings(rawSettings = {}) {
+  const parsedDefaultIterations = parseInt(String(rawSettings.defaultMaxIterations || ''), 10);
+  const normalizedIterations = Number.isInteger(parsedDefaultIterations) && parsedDefaultIterations > 0
+    ? Math.min(parsedDefaultIterations, 100)
+    : DEFAULT_APP_UI_SETTINGS.defaultMaxIterations;
+
+  return {
+    defaultPrompt: typeof rawSettings.defaultPrompt === 'string' ? rawSettings.defaultPrompt : '',
+    defaultMaxIterations: normalizedIterations,
+    defaultClaudeSettingId: typeof rawSettings.defaultClaudeSettingId === 'string'
+      ? rawSettings.defaultClaudeSettingId.trim()
+      : '',
+    optimizePreset: typeof rawSettings.optimizePreset === 'string' && rawSettings.optimizePreset.trim()
+      ? rawSettings.optimizePreset
+      : DEFAULT_APP_UI_SETTINGS.optimizePreset,
+    optimizeProvider: String(rawSettings.optimizeProvider || DEFAULT_APP_UI_SETTINGS.optimizeProvider)
+      .trim()
+      .toLowerCase() === 'openai'
+      ? 'openai'
+      : 'anthropic',
+    optimizeBaseUrl: typeof rawSettings.optimizeBaseUrl === 'string'
+      ? rawSettings.optimizeBaseUrl.trim()
+      : '',
+    optimizeModel: typeof rawSettings.optimizeModel === 'string' && rawSettings.optimizeModel.trim()
+      ? rawSettings.optimizeModel.trim()
+      : DEFAULT_APP_UI_SETTINGS.optimizeModel,
+    optimizeApiKey: typeof rawSettings.optimizeApiKey === 'string'
+      ? rawSettings.optimizeApiKey.trim()
+      : ''
+  };
+}
+
+function loadAppUISettingsFromStorage() {
+  try {
+    const raw = window.localStorage.getItem(APP_UI_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return { ...DEFAULT_APP_UI_SETTINGS };
+    }
+    const parsed = JSON.parse(raw);
+    return normalizeAppUISettings(parsed);
+  } catch (error) {
+    console.warn('Failed to parse app ui settings, fallback to default:', error);
+    return { ...DEFAULT_APP_UI_SETTINGS };
+  }
+}
+
+function saveAppUISettingsToStorage(settings) {
+  window.localStorage.setItem(APP_UI_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+}
+
+function initializeAppUISettings() {
+  appUISettings = loadAppUISettingsFromStorage();
+}
+
+function generateDetailedTaskList(promptText) {
+  const normalizedPrompt = String(promptText || '').replace(/\r/g, '').trim();
+  const promptSegments = normalizedPrompt
+    .split(/\n|[。！？.!?]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length >= 4);
+
+  const primaryGoal = promptSegments[0] || '明确目标并定义可验证交付物';
+  const tasks = [
+    `澄清目标与验收标准：${primaryGoal}`,
+    '扫描仓库上下文：阅读 README、任务说明与关键源码入口',
+    '拆分可执行子任务并标记先后顺序（每步都可验证）'
+  ];
+
+  if (/修复|报错|错误|bug|异常|失败/i.test(normalizedPrompt)) {
+    tasks.push('复现问题并定位根因，记录触发条件与影响范围');
+  } else {
+    tasks.push('先完成最小可运行版本，再逐步扩展功能');
+  }
+
+  if (/接口|api|服务|后端|数据库/i.test(normalizedPrompt)) {
+    tasks.push('实现或修正接口与数据层，并补齐必要的输入校验');
+  }
+
+  if (/页面|前端|ui|交互/i.test(normalizedPrompt)) {
+    tasks.push('实现界面与交互逻辑，覆盖关键状态与边界场景');
+  }
+
+  tasks.push('运行构建与测试，针对失败项定位并修复，直到通过');
+  tasks.push('整理变更摘要、测试结果、风险点与后续建议');
+
+  const uniqueTasks = [];
+  tasks.forEach((task) => {
+    if (!uniqueTasks.includes(task)) {
+      uniqueTasks.push(task);
+    }
+  });
+
+  return uniqueTasks.slice(0, 10);
+}
+
+function buildTaskListText(tasks = []) {
+  return tasks.map((task, index) => `${index + 1}. ${task}`).join('\n');
+}
+
+function escapeRegExp(pattern) {
+  return pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function upsertTaskListIntoPrompt(promptText, tasks = []) {
+  const normalizedPrompt = String(promptText || '').trim();
+  const taskListText = buildTaskListText(tasks);
+  const taskBlock = `${TASK_PLAN_START_MARKER}\n${taskListText}\n${TASK_PLAN_END_MARKER}`;
+  const matcher = new RegExp(
+    `${escapeRegExp(TASK_PLAN_START_MARKER)}[\\s\\S]*?${escapeRegExp(TASK_PLAN_END_MARKER)}`,
+    'm'
+  );
+
+  if (!normalizedPrompt) {
+    return taskBlock;
+  }
+  if (matcher.test(normalizedPrompt)) {
+    return normalizedPrompt.replace(matcher, taskBlock);
+  }
+  return `${normalizedPrompt}\n\n${taskBlock}`;
+}
+
+function buildPromptOptimizationRequest(rawPrompt) {
+  const inputPrompt = String(rawPrompt || '').trim() || appUISettings.defaultPrompt.trim();
+  const normalizedInputPrompt = inputPrompt || '读取任务目标并完成实现，逐步验证后输出总结。';
+  const tasks = generateDetailedTaskList(normalizedInputPrompt);
+  const generatedTaskListText = buildTaskListText(tasks);
+  const preset = String(appUISettings.optimizePreset || '').trim() || DEFAULT_PROMPT_OPTIMIZE_PRESET;
+  const resolvedPreset = replaceTemplateToken(
+    replaceTemplateToken(preset, '{{input_prompt}}', normalizedInputPrompt),
+    '{{generated_task_list}}',
+    generatedTaskListText
+  );
+
+  const requestPrompt = `你是资深 AI 编程任务提示词优化器。请把输入任务改写为“可直接用于 Ralph Loop”的高质量提示词。
+
+原始任务目标：
+${normalizedInputPrompt}
+
+优化预设（可遵循）：
+${resolvedPreset}
+
+建议任务列表：
+${generatedTaskListText}
+
+输出硬性要求：
+1. 只输出“最终优化后的提示词正文”，不要解释或前后缀。
+2. 必须包含“详细任务列表”分节，步骤需要可验证。
+3. 包含失败重试策略、验收标准、以及最终总结输出要求。`;
+
+  return {
+    requestPrompt,
+    sourcePrompt: normalizedInputPrompt,
+    tasks
+  };
+}
+
+function unwrapAiOptimizedPrompt(rawOutput) {
+  const text = String(rawOutput || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const blockMatch = text.match(/```(?:\w+)?\n([\s\S]*?)```/);
+  let normalized = blockMatch ? blockMatch[1].trim() : text;
+  normalized = normalized.replace(/^优化后提示词[:：]?\s*/i, '').trim();
+  return normalized;
+}
+
+async function runOptimizePromptInvoke(promptText, timeoutMs = 30_000) {
+  const provider = String(appUISettings.optimizeProvider || 'anthropic').toLowerCase();
+  const model = String(appUISettings.optimizeModel || '').trim();
+  const apiKey = String(appUISettings.optimizeApiKey || '').trim();
+  const baseUrl = String(appUISettings.optimizeBaseUrl || '').trim() || null;
+  if (!apiKey) {
+    throw new Error('请先在全局设置填写 AI 优化 API Key');
+  }
+  if (!model) {
+    throw new Error('请先在全局设置填写 AI 优化模型');
+  }
+
+  const invokePromise = invokeWithDebug('optimize_prompt_api', {
+    provider,
+    api_key: apiKey,
+    base_url: baseUrl,
+    model,
+    prompt: promptText,
+    timeout_seconds: Math.max(5, Math.round(timeoutMs / 1000))
+  });
+  const timeoutPromise = new Promise((_, reject) => {
+    window.setTimeout(() => reject(new Error(`优化请求超时（前端 ${Math.round(timeoutMs / 1000)}s）`)), timeoutMs);
+  });
+  return Promise.race([invokePromise, timeoutPromise]);
+}
 
 function getCurrentProject() {
   return projectManager?.getCurrentProject() || null;
@@ -219,12 +459,33 @@ const tabTerminal = document.getElementById('tab-terminal');
 const tabDebug = document.getElementById('tab-debug');
 const panelTerminal = document.getElementById('panel-terminal');
 const panelDebug = document.getElementById('panel-debug');
+const appToast = document.getElementById('app-toast');
 const runningSessionsContainer = document.getElementById('running-sessions');
 const runningSessionsList = document.getElementById('running-sessions-list');
+const promptAiOptimizeBtn = document.getElementById('prompt-ai-optimize-btn');
 const promptGuideBtn = document.getElementById('prompt-guide-btn');
 const promptGuideModal = document.getElementById('prompt-guide-modal');
 const promptGuideCloseBtn = document.getElementById('prompt-guide-close-btn');
 const promptGuideOkBtn = document.getElementById('prompt-guide-ok-btn');
+const appSettingsBtn = document.getElementById('app-settings-btn');
+const appSettingsModal = document.getElementById('app-settings-modal');
+const appSettingsCloseBtn = document.getElementById('app-settings-close-btn');
+const appSettingsCancelBtn = document.getElementById('app-settings-cancel-btn');
+const appSettingsSaveBtn = document.getElementById('app-settings-save-btn');
+const appDefaultPromptInput = document.getElementById('app-default-prompt');
+const appDefaultMaxIterationsInput = document.getElementById('app-default-max-iterations');
+const appDefaultClaudeSettingSelect = document.getElementById('app-default-claude-setting');
+const appOptimizePresetInput = document.getElementById('app-optimize-preset');
+const appOptimizeProviderSelect = document.getElementById('app-optimize-provider');
+const appOptimizeBaseUrlInput = document.getElementById('app-optimize-base-url');
+const appOptimizeModelInput = document.getElementById('app-optimize-model');
+const appOptimizeApiKeyInput = document.getElementById('app-optimize-api-key');
+const taskPlanModal = document.getElementById('task-plan-modal');
+const taskPlanCloseBtn = document.getElementById('task-plan-close-btn');
+const taskPlanCancelBtn = document.getElementById('task-plan-cancel-btn');
+const taskPlanConfirmBtn = document.getElementById('task-plan-confirm-btn');
+const taskPlanSummary = document.getElementById('task-plan-summary');
+const taskPlanList = document.getElementById('task-plan-list');
 
 function openPromptGuideModal() {
   if (!promptGuideModal) {
@@ -240,6 +501,189 @@ function closePromptGuideModal() {
   }
   promptGuideModal.classList.remove('visible');
   promptGuideModal.classList.add('hidden');
+}
+
+async function refreshAppDefaultClaudeSettingOptions(selectedId = appUISettings.defaultClaudeSettingId) {
+  if (!appDefaultClaudeSettingSelect || !invoke) {
+    return;
+  }
+  try {
+    const settings = await invoke('get_claude_settings_files');
+    appDefaultClaudeSettingSelect.innerHTML = '';
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = '不指定（保持项目配置）';
+    appDefaultClaudeSettingSelect.appendChild(defaultOption);
+    settings.forEach((setting) => {
+      const option = document.createElement('option');
+      option.value = setting.id;
+      option.textContent = setting.name;
+      appDefaultClaudeSettingSelect.appendChild(option);
+    });
+    const hasSelectedOption = settings.some((setting) => setting.id === selectedId);
+    appDefaultClaudeSettingSelect.value = hasSelectedOption ? selectedId : '';
+  } catch (error) {
+    appendDebugLog('加载默认 Claude Setting 选项失败', error);
+  }
+}
+
+function applyAppSettingsToForm() {
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    if (promptInput && !promptInput.value.trim() && appUISettings.defaultPrompt.trim()) {
+      promptInput.value = appUISettings.defaultPrompt;
+    }
+    if (maxIterationsInput && !maxIterationsInput.value.trim()) {
+      maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
+    }
+    return;
+  }
+
+  if (promptInput && !String(currentProject.last_prompt || '').trim()) {
+    promptInput.value = appUISettings.defaultPrompt || '';
+  }
+  if (maxIterationsInput && !Number.isInteger(currentProject.max_iterations)) {
+    maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
+  }
+}
+
+async function openAppSettingsModal() {
+  if (!appSettingsModal) {
+    return;
+  }
+  if (appDefaultPromptInput) {
+    appDefaultPromptInput.value = appUISettings.defaultPrompt;
+  }
+  if (appDefaultMaxIterationsInput) {
+    appDefaultMaxIterationsInput.value = String(appUISettings.defaultMaxIterations);
+  }
+  if (appOptimizePresetInput) {
+    appOptimizePresetInput.value = appUISettings.optimizePreset;
+  }
+  if (appOptimizeProviderSelect) {
+    appOptimizeProviderSelect.value = appUISettings.optimizeProvider || 'anthropic';
+  }
+  if (appOptimizeBaseUrlInput) {
+    appOptimizeBaseUrlInput.value = appUISettings.optimizeBaseUrl || '';
+  }
+  if (appOptimizeModelInput) {
+    appOptimizeModelInput.value = appUISettings.optimizeModel || '';
+  }
+  if (appOptimizeApiKeyInput) {
+    appOptimizeApiKeyInput.value = appUISettings.optimizeApiKey || '';
+  }
+  await refreshAppDefaultClaudeSettingOptions(appUISettings.defaultClaudeSettingId);
+  appSettingsModal.classList.remove('hidden');
+  appSettingsModal.classList.add('visible');
+}
+
+function closeAppSettingsModal() {
+  if (!appSettingsModal) {
+    return;
+  }
+  appSettingsModal.classList.remove('visible');
+  appSettingsModal.classList.add('hidden');
+}
+
+function saveAppSettingsFromModal() {
+  if (
+    !appDefaultPromptInput
+    || !appDefaultMaxIterationsInput
+    || !appOptimizePresetInput
+    || !appDefaultClaudeSettingSelect
+  ) {
+    return;
+  }
+
+  const draftSettings = normalizeAppUISettings({
+    defaultPrompt: appDefaultPromptInput.value,
+    defaultMaxIterations: appDefaultMaxIterationsInput.value,
+    defaultClaudeSettingId: appDefaultClaudeSettingSelect.value,
+    optimizePreset: appOptimizePresetInput.value,
+    optimizeProvider: appOptimizeProviderSelect?.value || 'anthropic',
+    optimizeBaseUrl: appOptimizeBaseUrlInput?.value || '',
+    optimizeModel: appOptimizeModelInput?.value || '',
+    optimizeApiKey: appOptimizeApiKeyInput?.value || ''
+  });
+  appUISettings = draftSettings;
+  saveAppUISettingsToStorage(appUISettings);
+  applyAppSettingsToForm();
+  closeAppSettingsModal();
+  appendDebugLog('全局设置已更新', appUISettings);
+}
+
+async function applyDefaultClaudeSettingIfNeeded(project) {
+  if (!project || !projectManager || !appUISettings.defaultClaudeSettingId) {
+    return project;
+  }
+  if (project.claude_setting_id) {
+    return project;
+  }
+  try {
+    const updated = await projectManager.updateProject(
+      project.id,
+      {
+        name: project.name,
+        description: project.description,
+        workDirectory: project.work_directory,
+        maxIterations: project.max_iterations,
+        completionPromise: project.completion_promise,
+        lastPrompt: project.last_prompt,
+        claudeSettingId: appUISettings.defaultClaudeSettingId,
+        overwriteClaudeSettings: false,
+        enabled: project.enabled
+      },
+      {
+        reloadProjects: false,
+        silent: true,
+        closeModal: false
+      }
+    );
+    appendDebugLog('已自动应用默认 Claude Setting', {
+      project_id: project.id,
+      setting_id: appUISettings.defaultClaudeSettingId
+    });
+    return updated;
+  } catch (error) {
+    appendDebugLog('自动应用默认 Claude Setting 失败', error);
+    return project;
+  }
+}
+
+function closeTaskPlanModal(confirmed = false) {
+  if (!taskPlanModal) {
+    return;
+  }
+  taskPlanModal.classList.remove('visible');
+  taskPlanModal.classList.add('hidden');
+  if (taskPlanModalResolver) {
+    const resolve = taskPlanModalResolver;
+    taskPlanModalResolver = null;
+    resolve(Boolean(confirmed));
+  }
+}
+
+function openTaskPlanModal(projectName, sourcePrompt, taskItems) {
+  if (!taskPlanModal || !taskPlanSummary || !taskPlanList) {
+    return Promise.resolve(true);
+  }
+  if (taskPlanModalResolver) {
+    taskPlanModalResolver(false);
+    taskPlanModalResolver = null;
+  }
+  taskPlanSummary.textContent = `项目：${projectName}\n目标：${sourcePrompt || '未提供，已使用默认提示词'}`;
+  taskPlanList.innerHTML = '';
+  taskItems.forEach((task) => {
+    const item = document.createElement('li');
+    item.textContent = task;
+    taskPlanList.appendChild(item);
+  });
+
+  taskPlanModal.classList.remove('hidden');
+  taskPlanModal.classList.add('visible');
+  return new Promise((resolve) => {
+    taskPlanModalResolver = resolve;
+  });
 }
 
 /**
@@ -279,6 +723,84 @@ function serializeDebugValue(value) {
 }
 
 /**
+ * Extracts one readable error message from nested/unknown error payloads.
+ */
+function extractErrorMessage(error) {
+  const parsePossibleJsonMessage = (text) => {
+    const normalized = String(text || '').trim();
+    if (!normalized) {
+      return '';
+    }
+
+    const candidates = [];
+    if (normalized.startsWith('{') && normalized.endsWith('}')) {
+      candidates.push(normalized);
+    } else {
+      const firstBrace = normalized.indexOf('{');
+      const lastBrace = normalized.lastIndexOf('}');
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        candidates.push(normalized.slice(firstBrace, lastBrace + 1));
+      }
+    }
+
+    for (const rawCandidate of candidates) {
+      try {
+        const parsed = JSON.parse(rawCandidate);
+        const nestedMessage =
+          (typeof parsed?.error?.message === 'string' && parsed.error.message) ||
+          (typeof parsed?.msg === 'string' && parsed.msg) ||
+          (typeof parsed?.message === 'string' && parsed.message) ||
+          '';
+        if (nestedMessage) {
+          const code = parsed?.error?.code ?? parsed?.code;
+          return code !== undefined && code !== null && code !== ''
+            ? `code=${String(code)}, ${nestedMessage}`
+            : nestedMessage;
+        }
+      } catch (_err) {
+        // Ignore non-JSON text and continue.
+      }
+    }
+    return '';
+  };
+
+  if (error == null) {
+    return '未知错误';
+  }
+  if (typeof error === 'string') {
+    const parsedMessage = parsePossibleJsonMessage(error);
+    return parsedMessage || error.trim() || '未知错误';
+  }
+  if (error instanceof Error) {
+    const parsedMessage = parsePossibleJsonMessage(error.message);
+    return parsedMessage || error.message || `${error.name}: 未知错误`;
+  }
+  if (typeof error === 'object') {
+    const directMessage = typeof error.message === 'string' ? error.message : '';
+    if (directMessage) {
+      const parsedMessage = parsePossibleJsonMessage(directMessage);
+      return parsedMessage || directMessage;
+    }
+    const nestedMessage = typeof error.error?.message === 'string' ? error.error.message : '';
+    if (nestedMessage) {
+      return nestedMessage;
+    }
+    const msg = typeof error.msg === 'string' ? error.msg : '';
+    if (msg) {
+      const code = typeof error.code !== 'undefined' ? String(error.code) : '';
+      return code ? `code=${code}, msg=${msg}` : msg;
+    }
+    try {
+      const dumped = JSON.stringify(error);
+      return dumped && dumped !== '{}' ? dumped : '未知错误对象';
+    } catch (_err) {
+      return String(error);
+    }
+  }
+  return String(error);
+}
+
+/**
  * Appends one timestamped debug message.
  */
 function appendDebugLog(message, data) {
@@ -288,6 +810,32 @@ function appendDebugLog(message, data) {
   console.log(line);
   debugLog.textContent += `${line}\n`;
   debugLog.scrollTop = debugLog.scrollHeight;
+}
+
+function showToast(message, variant = 'error', durationMs = 4500) {
+  const text = String(message || '').trim();
+  if (!text) {
+    return;
+  }
+  if (!appToast) {
+    alert(text);
+    return;
+  }
+
+  appToast.textContent = text;
+  appToast.classList.remove('success');
+  if (variant === 'success') {
+    appToast.classList.add('success');
+  }
+  appToast.classList.add('show');
+
+  if (toastHideTimer) {
+    window.clearTimeout(toastHideTimer);
+  }
+  toastHideTimer = window.setTimeout(() => {
+    appToast.classList.remove('show');
+    toastHideTimer = null;
+  }, Math.max(1200, Number(durationMs) || 4500));
 }
 
 /**
@@ -725,23 +1273,26 @@ function syncUI() {
   promptInput.disabled = currentProjectRunning;
   maxIterationsInput.disabled = currentProjectRunning;
   completionPromiseInput.disabled = currentProjectRunning;
-  statusDiv.className = 'status';
 
-  if (currentProjectRunning) {
-    statusDiv.classList.add('running');
-    statusDiv.textContent = `状态: 运行中 (${runningCount} 个任务)`;
-  } else if (!hasCurrentProject) {
-    statusDiv.classList.add('disabled');
-    statusDiv.textContent = '状态: 未选择项目';
-  } else if (runningCount > 0) {
-    statusDiv.classList.add('enabled');
-    statusDiv.textContent = `状态: 当前项目空闲 (另有 ${runningCount} 个任务运行)`;
-  } else if (currentProjectEnabled) {
-    statusDiv.classList.add('enabled');
-    statusDiv.textContent = '状态: 项目已启用';
-  } else {
-    statusDiv.classList.add('disabled');
-    statusDiv.textContent = '状态: 项目已禁用';
+  if (statusDiv) {
+    statusDiv.className = 'status';
+
+    if (currentProjectRunning) {
+      statusDiv.classList.add('running');
+      statusDiv.textContent = `状态: 运行中 (${runningCount} 个任务)`;
+    } else if (!hasCurrentProject) {
+      statusDiv.classList.add('disabled');
+      statusDiv.textContent = '状态: 未选择项目';
+    } else if (runningCount > 0) {
+      statusDiv.classList.add('enabled');
+      statusDiv.textContent = `状态: 当前项目空闲 (另有 ${runningCount} 个任务运行)`;
+    } else if (currentProjectEnabled) {
+      statusDiv.classList.add('enabled');
+      statusDiv.textContent = '状态: 项目已启用';
+    } else {
+      statusDiv.classList.add('disabled');
+      statusDiv.textContent = '状态: 项目已禁用';
+    }
   }
 
   renderRunningSessionsBar();
@@ -941,15 +1492,15 @@ function handleProjectChange(project) {
   if (project) {
     currentProjectEnabled = Boolean(project.enabled);
     workDirInput.value = project.work_directory || '';
-    promptInput.value = project.last_prompt || '';
-    maxIterationsInput.value = project.max_iterations?.toString() || '';
+    promptInput.value = project.last_prompt || appUISettings.defaultPrompt || '';
+    maxIterationsInput.value = project.max_iterations?.toString() || String(appUISettings.defaultMaxIterations);
     completionPromiseInput.value = project.completion_promise || '';
   } else {
     currentProjectEnabled = false;
     // Clear form when no project selected
     workDirInput.value = '';
-    promptInput.value = '';
-    maxIterationsInput.value = '';
+    promptInput.value = appUISettings.defaultPrompt || '';
+    maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
     completionPromiseInput.value = '';
   }
 
@@ -1005,6 +1556,7 @@ async function init() {
   try {
     await initTerminal();
     invoke = getInvoke();
+    initializeAppUISettings();
     appendDebugLog('tauri runtime detected');
 
     // Initialize project manager
@@ -1013,9 +1565,14 @@ async function init() {
     projectManager.onProjectsUpdate = handleProjectsUpdate;
     projectManager.onProjectRun = handleProjectRun;
     projectManager.onProjectToggle = handleProjectToggle;
+    projectManager.onClaudeSettingsChange = () => {
+      void refreshAppDefaultClaudeSettingOptions();
+    };
     await projectManager.initialize();
     appendDebugLog('project manager initialized');
     initializeRuntimeTimeoutControls();
+    await refreshAppDefaultClaudeSettingOptions();
+    applyAppSettingsToForm();
 
     currentProjectEnabled = Boolean(projectManager.getCurrentProject()?.enabled);
     syncUI();
@@ -1069,6 +1626,61 @@ async function handleToggle() {
   }
 }
 
+async function handlePromptAiOptimize() {
+  if (!promptInput) {
+    return;
+  }
+
+  const currentProject = getCurrentProject();
+  const workDir = workDirInput.value || currentProject?.work_directory || '.';
+  const {
+    requestPrompt,
+    tasks
+  } = buildPromptOptimizationRequest(promptInput.value);
+
+  if (promptAiOptimizeBtn) {
+    promptAiOptimizeBtn.disabled = true;
+    promptAiOptimizeBtn.textContent = '优化中...';
+  }
+
+  try {
+    appendDebugLog('提示词优化请求已发送', {
+      protocol: 'claude-cli',
+      work_dir: workDir
+    });
+    const aiOutput = await runOptimizePromptInvoke(requestPrompt, 30_000);
+    const unwrappedPrompt = unwrapAiOptimizedPrompt(aiOutput);
+    if (!unwrappedPrompt) {
+      throw new Error('AI 返回为空，未生成可用提示词');
+    }
+    const finalPrompt = upsertTaskListIntoPrompt(unwrappedPrompt, tasks);
+
+    promptInput.value = finalPrompt;
+    if (!String(maxIterationsInput.value || '').trim()) {
+      maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
+    }
+    queueProjectAutoSave('prompt-ai-optimize', { force: true });
+    appendDebugLog('提示词已通过 Claude AI 优化', {
+      source_prompt_preview: String(promptInput.value || '').slice(0, 120),
+      optimized_length: finalPrompt.length,
+      generated_task_count: tasks.length
+    });
+  } catch (error) {
+    const errorMessage = extractErrorMessage(error);
+    appendDebugLog('AI 优化失败（直接返回）', {
+      message: errorMessage,
+      raw: error
+    });
+    showToast(`AI 优化失败: ${errorMessage}`, 'error', 6000);
+  } finally {
+    if (promptAiOptimizeBtn) {
+      promptAiOptimizeBtn.innerHTML = '<i data-lucide="wand-sparkles"></i> AI 优化';
+      promptAiOptimizeBtn.disabled = false;
+      refreshPageIcons();
+    }
+  }
+}
+
 /**
  * Handles start button clicks.
  */
@@ -1076,9 +1688,10 @@ async function handleStart(options = {}) {
   const {
     projectId = null,
     preserveTerminalHistory = false,
-    triggerSource = 'manual'
+    triggerSource = 'manual',
+    skipTaskPlanReview = false
   } = options;
-  const currentProject = projectManager?.getCurrentProject();
+  let currentProject = projectManager?.getCurrentProject();
   const targetProjectId = projectId || currentProject?.id || null;
 
   appendDebugLog('start button clicked', {
@@ -1101,8 +1714,41 @@ async function handleStart(options = {}) {
     return;
   }
 
+  if (!skipTaskPlanReview) {
+    const promptSeed = String(promptInput.value || '').trim()
+      || appUISettings.defaultPrompt.trim()
+      || currentProject.description
+      || currentProject.name;
+    const taskItems = generateDetailedTaskList(promptSeed);
+    const approved = await openTaskPlanModal(currentProject.name, promptSeed, taskItems);
+    if (!approved) {
+      appendDebugLog('start canceled in task-plan review', { project_id: targetProjectId });
+      return;
+    }
+
+    const promptBaseline = String(promptInput.value || '').trim()
+      ? promptInput.value
+      : (appUISettings.defaultPrompt || promptSeed);
+    const promptWithTaskList = upsertTaskListIntoPrompt(promptBaseline, taskItems);
+    if (promptInput.value !== promptWithTaskList) {
+      promptInput.value = promptWithTaskList;
+    }
+    if (!String(maxIterationsInput.value || '').trim()) {
+      maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
+    }
+
+    queueProjectAutoSave('task-plan-generated', { force: true });
+    return handleStart({
+      ...options,
+      skipTaskPlanReview: true
+    });
+  }
+
   // Ensure latest right-side edits are persisted before run.
   await flushProjectAutoSave('before-start', { force: true });
+  currentProject = projectManager?.getCurrentProject() || currentProject;
+  currentProject = await applyDefaultClaudeSettingIfNeeded(currentProject);
+  currentProject = projectManager?.getCurrentProject() || currentProject;
 
   if (!preserveTerminalHistory) {
     terminalHistoryByProject.set(targetProjectId, '');
@@ -1120,7 +1766,7 @@ async function handleStart(options = {}) {
   const parsedIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : null;
   const maxIterations = Number.isInteger(parsedIterations) && parsedIterations > 0
     ? parsedIterations
-    : currentProject.max_iterations;
+    : (currentProject.max_iterations || appUISettings.defaultMaxIterations);
   const completionPromise = completionPromiseInput.value || currentProject.completion_promise;
   const normalizedCompletionPromise = typeof completionPromise === 'string'
     ? completionPromise.trim()
@@ -1511,6 +2157,9 @@ if (hardStopTimeoutInput) {
     }
   });
 }
+if (promptAiOptimizeBtn) {
+  promptAiOptimizeBtn.addEventListener('click', handlePromptAiOptimize);
+}
 if (promptGuideBtn) {
   promptGuideBtn.addEventListener('click', openPromptGuideModal);
 }
@@ -1527,8 +2176,56 @@ if (promptGuideModal) {
     }
   });
 }
+if (appSettingsBtn) {
+  appSettingsBtn.addEventListener('click', () => {
+    void openAppSettingsModal();
+  });
+}
+if (appSettingsCloseBtn) {
+  appSettingsCloseBtn.addEventListener('click', closeAppSettingsModal);
+}
+if (appSettingsCancelBtn) {
+  appSettingsCancelBtn.addEventListener('click', closeAppSettingsModal);
+}
+if (appSettingsSaveBtn) {
+  appSettingsSaveBtn.addEventListener('click', saveAppSettingsFromModal);
+}
+if (appSettingsModal) {
+  appSettingsModal.addEventListener('click', (event) => {
+    if (event.target === appSettingsModal) {
+      closeAppSettingsModal();
+    }
+  });
+}
+if (taskPlanCloseBtn) {
+  taskPlanCloseBtn.addEventListener('click', () => closeTaskPlanModal(false));
+}
+if (taskPlanCancelBtn) {
+  taskPlanCancelBtn.addEventListener('click', () => closeTaskPlanModal(false));
+}
+if (taskPlanConfirmBtn) {
+  taskPlanConfirmBtn.addEventListener('click', () => closeTaskPlanModal(true));
+}
+if (taskPlanModal) {
+  taskPlanModal.addEventListener('click', (event) => {
+    if (event.target === taskPlanModal) {
+      closeTaskPlanModal(false);
+    }
+  });
+}
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && promptGuideModal?.classList.contains('visible')) {
+  if (event.key !== 'Escape') {
+    return;
+  }
+  if (taskPlanModal?.classList.contains('visible')) {
+    closeTaskPlanModal(false);
+    return;
+  }
+  if (appSettingsModal?.classList.contains('visible')) {
+    closeAppSettingsModal();
+    return;
+  }
+  if (promptGuideModal?.classList.contains('visible')) {
     closePromptGuideModal();
   }
 });

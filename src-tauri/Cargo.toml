@@ -27,4 +27,5 @@ portable-pty = "0.8"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
-tokio = { version = "1", features = ["fs", "io-util"] }
+tokio = { version = "1", features = ["fs", "io-util", "process", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
