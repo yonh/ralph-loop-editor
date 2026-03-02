@@ -756,19 +756,35 @@
     .tab-btn:last-child {
       border-right: none;
     }
-    .tab-btn.active {
+    .tab-btn.active,
+    .tab-btn[aria-selected="true"] {
       background: #ffffff;
       color: #0f172a;
     }
+    .tab-panels {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
     .tab-panel {
-      padding: 12px;
       flex: 1;
       display: flex;
       flex-direction: column;
       min-height: 0;
+      padding: 0;
     }
     .tab-panel[hidden] {
       display: none;
+    }
+    .tab-panel-settings {
+      background: #f8fafc;
+    }
+    .settings-panel-scroll {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 12px;
     }
     
     /* Modal styles */
@@ -1185,53 +1201,6 @@
     <div class="main-content">
     <input type="hidden" id="work-dir">
 
-    <div class="form-group">
-      <div class="prompt-label-row">
-        <label for="prompt">任务提示词</label>
-        <button type="button" class="prompt-guide-btn" id="prompt-guide-btn">更多详情</button>
-      </div>
-      <div class="prompt-editor-wrap">
-        <textarea id="prompt" placeholder="目标：一句话说明要实现什么
-完成标准：列出可验证结果（接口、测试、文档）
-过程要求：失败就定位并修复，直到通过
-结束输出：输出 <promise>阶段工作结束</promise>
-建议：任务越具体，循环越稳定"></textarea>
-        <button type="button" class="prompt-ai-optimize-btn" id="prompt-ai-optimize-btn">
-          <i data-lucide="wand-sparkles"></i> AI 优化
-        </button>
-      </div>
-    </div>
-
-     <div class="form-group">
-      <label for="completion-promise">完成承诺标记（可选）</label>
-      <input type="text" id="completion-promise" placeholder="例如：阶段性工作结束">
-      <div class="hint">用于识别“本轮已完成”，建议与任务提示词保持一致。</div>
-    </div>
-
-    <div class="compact-row">
-      <div class="compact-item">
-        <label for="max-iterations">循环次数</label>
-        <input type="number" id="max-iterations" placeholder="20" min="1" max="100">
-        <div class="hint">单轮迭代上限</div>
-      </div>
-
-      <div class="compact-item">
-        <label for="idle-next-timeout-seconds">空闲切换(秒)</label>
-        <input type="number" id="idle-next-timeout-seconds" min="0" step="1" placeholder="45">
-        <div class="hint">0=关闭，无输出后切下一轮</div>
-        <div class="hint runtime-countdown" id="idle-next-countdown">空闲倒计时: --</div>
-      </div>
-
-      <div class="compact-item">
-        <label for="hard-stop-timeout-seconds">硬中断(秒)</label>
-        <input type="number" id="hard-stop-timeout-seconds" min="0" step="1" placeholder="900">
-        <div class="hint">0=关闭，单轮最长运行时长</div>
-        <div class="hint runtime-countdown" id="hard-stop-countdown">硬中断倒计时: --</div>
-      </div>
-    </div>
-
-   
-
     <div class="divider"></div>
 
     <div class="controls">
@@ -1244,35 +1213,79 @@
       <div class="running-sessions-list" id="running-sessions-list"></div>
     </div>
 
-    <div class="logs-tabs">
-      <div class="tabs-header">
-        <button class="tab-btn active" id="tab-settings" data-tab="settings"><i data-lucide="settings"></i> 任务设置</button>
-        <button class="tab-btn" id="tab-terminal" data-tab="terminal"><i data-lucide="terminal"></i> 循环终端</button>
-        <button class="tab-btn" id="tab-debug" data-tab="debug"><i data-lucide="bug"></i> 调试日志</button>
+    <div class="logs-tabs" id="workspace-tabs">
+      <div class="tabs-header" role="tablist" aria-label="工作区标签页">
+        <button class="tab-btn active" id="tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="panel-settings"><i data-lucide="settings"></i> 任务设置</button>
+        <button class="tab-btn" id="tab-terminal" data-tab="terminal" role="tab" aria-selected="false" aria-controls="panel-terminal"><i data-lucide="terminal"></i> 循环终端</button>
+        <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-selected="false" aria-controls="panel-debug"><i data-lucide="bug"></i> 调试日志</button>
       </div>
 
-      <section class="tab-panel" id="panel-settings">
-        <div style="padding: 20px; color: #64748b; text-align: center;">
-          <p>任务设置面板 - 功能开发中</p>
-          <p style="font-size: 0.9rem; margin-top: 10px;">这里将包含：任务提示词、完成承诺标记、循环次数、空闲切换、硬中断等配置项</p>
-        </div>
-      </section>
+      <div class="tab-panels">
+        <section class="tab-panel tab-panel-settings" id="panel-settings" data-tab-panel="settings" role="tabpanel" aria-labelledby="tab-settings">
+          <div class="settings-panel-scroll">
+            <div class="form-group">
+              <div class="prompt-label-row">
+                <label for="prompt">任务提示词</label>
+                <button type="button" class="prompt-guide-btn" id="prompt-guide-btn">更多详情</button>
+              </div>
+              <div class="prompt-editor-wrap">
+                <textarea id="prompt" placeholder="目标：一句话说明要实现什么
+完成标准：列出可验证结果（接口、测试、文档）
+过程要求：失败就定位并修复，直到通过
+结束输出：输出 <promise>阶段工作结束</promise>
+建议：任务越具体，循环越稳定"></textarea>
+                <button type="button" class="prompt-ai-optimize-btn" id="prompt-ai-optimize-btn">
+                  <i data-lucide="wand-sparkles"></i> AI 优化
+                </button>
+              </div>
+            </div>
 
-      <section class="tab-panel" id="panel-terminal" hidden>
-        <div class="terminal-panel" style="margin-top: 0; border: none; border-radius: 0;">
-          <div id="terminal-output"></div>
-          <div class="terminal-input-row">
-            <input type="text" id="terminal-input" placeholder="输入指令后回车发送">
-            <button id="send-btn" disabled><i data-lucide="send"></i> 发送</button>
+            <div class="form-group">
+              <label for="completion-promise">完成承诺标记（可选）</label>
+              <input type="text" id="completion-promise" placeholder="例如：阶段性工作结束">
+              <div class="hint">用于识别“本轮已完成”，建议与任务提示词保持一致。</div>
+            </div>
+
+            <div class="compact-row">
+              <div class="compact-item">
+                <label for="max-iterations">循环次数</label>
+                <input type="number" id="max-iterations" placeholder="20" min="1" max="100">
+                <div class="hint">单轮迭代上限</div>
+              </div>
+
+              <div class="compact-item">
+                <label for="idle-next-timeout-seconds">空闲切换(秒)</label>
+                <input type="number" id="idle-next-timeout-seconds" min="0" step="1" placeholder="45">
+                <div class="hint">0=关闭，无输出后切下一轮</div>
+                <div class="hint runtime-countdown" id="idle-next-countdown">空闲倒计时: --</div>
+              </div>
+
+              <div class="compact-item">
+                <label for="hard-stop-timeout-seconds">硬中断(秒)</label>
+                <input type="number" id="hard-stop-timeout-seconds" min="0" step="1" placeholder="900">
+                <div class="hint">0=关闭，单轮最长运行时长</div>
+                <div class="hint runtime-countdown" id="hard-stop-countdown">硬中断倒计时: --</div>
+              </div>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section class="tab-panel" id="panel-debug" hidden>
-        <div class="debug-panel" style="margin-top: 0; border: none; border-radius: 0;">
-          <pre id="debug-log"></pre>
-        </div>
-      </section>
+        <section class="tab-panel" id="panel-terminal" data-tab-panel="terminal" role="tabpanel" aria-labelledby="tab-terminal" hidden>
+          <div class="terminal-panel" style="margin-top: 0; border: none; border-radius: 0;">
+            <div id="terminal-output"></div>
+            <div class="terminal-input-row">
+              <input type="text" id="terminal-input" placeholder="输入指令后回车发送">
+              <button id="send-btn" disabled><i data-lucide="send"></i> 发送</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="panel-debug" data-tab-panel="debug" role="tabpanel" aria-labelledby="tab-debug" hidden>
+          <div class="debug-panel" style="margin-top: 0; border: none; border-radius: 0;">
+            <pre id="debug-log"></pre>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 

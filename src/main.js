@@ -455,12 +455,9 @@ const terminalOutput = document.getElementById('terminal-output');
 const terminalInput = document.getElementById('terminal-input');
 const sendBtn = document.getElementById('send-btn');
 const debugLog = document.getElementById('debug-log');
-const tabSettings = document.getElementById('tab-settings');
-const tabTerminal = document.getElementById('tab-terminal');
-const tabDebug = document.getElementById('tab-debug');
-const panelSettings = document.getElementById('panel-settings');
-const panelTerminal = document.getElementById('panel-terminal');
-const panelDebug = document.getElementById('panel-debug');
+const workspaceTabs = document.getElementById('workspace-tabs');
+const tabButtons = Array.from(document.querySelectorAll('.tab-btn[data-tab]'));
+const tabPanels = Array.from(document.querySelectorAll('.tab-panel[data-tab-panel]'));
 const appToast = document.getElementById('app-toast');
 const runningSessionsContainer = document.getElementById('running-sessions');
 const runningSessionsList = document.getElementById('running-sessions-list');
@@ -1061,21 +1058,74 @@ async function initTerminal() {
 /**
  * Switches between settings, terminal and debug log tabs.
  */
-function switchLogTab(tab) {
-  // Hide all panels
-  panelSettings.hidden = tab !== 'settings';
-  panelTerminal.hidden = tab !== 'terminal';
-  panelDebug.hidden = tab !== 'debug';
+function switchLogTab(tab, options = {}) {
+  const { focusTerminal = true } = options;
+  if (tabButtons.length === 0 || tabPanels.length === 0) {
+    return;
+  }
 
-  // Update tab button active states
-  tabSettings.classList.toggle('active', tab === 'settings');
-  tabTerminal.classList.toggle('active', tab === 'terminal');
-  tabDebug.classList.toggle('active', tab === 'debug');
+  const hasTargetTab = tabButtons.some((button) => button.dataset.tab === tab);
+  const nextTab = hasTargetTab ? tab : tabButtons[0]?.dataset.tab;
+  if (!nextTab) {
+    return;
+  }
 
-  // Focus terminal when switching to terminal tab
-  if (tab === 'terminal' && terminalComponent) {
+  tabButtons.forEach((button) => {
+    const isActive = button.dataset.tab === nextTab;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    button.tabIndex = isActive ? 0 : -1;
+  });
+
+  tabPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.tabPanel !== nextTab;
+  });
+
+  if (nextTab === 'terminal' && focusTerminal && terminalComponent) {
     terminalComponent.focus();
   }
+}
+
+function setupLogTabs() {
+  if (workspaceTabs && tabButtons.length > 0) {
+    workspaceTabs.addEventListener('click', (event) => {
+      const targetButton = event.target.closest('.tab-btn[data-tab]');
+      if (!targetButton) {
+        return;
+      }
+      switchLogTab(targetButton.dataset.tab);
+    });
+  }
+
+  tabButtons.forEach((button, index) => {
+    button.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+
+      let nextIndex = index;
+      if (event.key === 'ArrowRight') {
+        nextIndex = (index + 1) % tabButtons.length;
+      } else if (event.key === 'ArrowLeft') {
+        nextIndex = (index - 1 + tabButtons.length) % tabButtons.length;
+      } else if (event.key === 'Home') {
+        nextIndex = 0;
+      } else if (event.key === 'End') {
+        nextIndex = tabButtons.length - 1;
+      }
+
+      const nextButton = tabButtons[nextIndex];
+      if (!nextButton) {
+        return;
+      }
+      switchLogTab(nextButton.dataset.tab, { focusTerminal: false });
+      nextButton.focus();
+    });
+  });
+
+  const initiallyActiveButton = tabButtons.find((button) => button.classList.contains('active'));
+  switchLogTab(initiallyActiveButton?.dataset.tab || tabButtons[0]?.dataset.tab, { focusTerminal: false });
 }
 
 /**
@@ -2126,13 +2176,11 @@ function handleUnhandledRejection(event) {
 }
 
 // Event listeners
+setupLogTabs();
 toggleBtn.addEventListener('click', handleToggle);
 startBtn.addEventListener('click', handleStart);
 stopBtn.addEventListener('click', handleStop);
 sendBtn.addEventListener('click', handleSendInput);
-tabSettings.addEventListener('click', () => switchLogTab('settings'));
-tabTerminal.addEventListener('click', () => switchLogTab('terminal'));
-tabDebug.addEventListener('click', () => switchLogTab('debug'));
 terminalInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') {
     event.preventDefault();
