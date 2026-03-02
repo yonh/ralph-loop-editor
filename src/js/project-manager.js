@@ -1209,6 +1209,40 @@ export class ProjectManager {
   }
 
   /**
+   * Sync one updated project object into local caches and refresh UI.
+   */
+  syncProjectSnapshot(project) {
+    if (!project?.id) {
+      return;
+    }
+
+    let projectExists = false;
+    this.projects = this.projects.map((item) => {
+      if (item.id !== project.id) {
+        return item;
+      }
+      projectExists = true;
+      return project;
+    });
+    if (!projectExists) {
+      this.projects.push(project);
+    }
+
+    if (this.currentProject && this.currentProject.id === project.id) {
+      this.currentProject = project;
+      this.updateCurrentProjectDisplay();
+      if (this.onProjectChange) {
+        this.onProjectChange(this.currentProject);
+      }
+    }
+
+    this.renderProjectList();
+    if (this.onProjectsUpdate) {
+      this.onProjectsUpdate(this.projects);
+    }
+  }
+
+  /**
    * Show modal for new project
    */
   async showNewProjectModal() {

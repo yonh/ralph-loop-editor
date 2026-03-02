@@ -388,7 +388,7 @@
     .prompt-label-row label {
       margin-bottom: 0;
     }
-    .prompt-guide-btn {
+    .prompt-history-open-btn {
       border: 1px solid #cbd5e1;
       background: #f8fafc;
       color: #334155;
@@ -400,7 +400,7 @@
       cursor: pointer;
       white-space: nowrap;
     }
-    .prompt-guide-btn:hover {
+    .prompt-history-open-btn:hover {
       background: #eef2ff;
       border-color: #a5b4fc;
       color: #1e3a8a;
@@ -411,6 +411,63 @@
     .prompt-editor-wrap textarea {
       min-height: 138px;
       padding-bottom: 42px;
+    }
+    .prompt-history-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .prompt-history-title {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #1e3a8a;
+    }
+    .prompt-history-empty {
+      font-size: 0.74rem;
+      color: #64748b;
+    }
+    .prompt-history-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .prompt-history-select {
+      min-width: 0;
+      font-size: 0.84rem;
+      padding: 8px 10px;
+    }
+    .prompt-history-apply-btn {
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      color: #334155;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .prompt-history-apply-btn:hover:not(:disabled) {
+      background: #eef2ff;
+      border-color: #a5b4fc;
+      color: #1e3a8a;
+      opacity: 1;
+    }
+    .prompt-history-preview {
+      min-height: 200px;
+      max-height: 300px;
+      overflow: auto;
+      border: 1px solid #dbeafe;
+      border-radius: 8px;
+      background: #f8fbff;
+      color: #1e293b;
+      font-size: 0.84rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      padding: 10px;
+      margin-top: 8px;
     }
     .prompt-ai-optimize-btn {
       position: absolute;
@@ -903,33 +960,6 @@
     .modal-danger-btn:hover {
       background: #dc2626;
     }
-    .prompt-guide-intro {
-      margin: 0 0 10px 0;
-      color: #334155;
-      font-size: 0.88rem;
-      line-height: 1.5;
-    }
-    .prompt-guide-list {
-      margin: 0;
-      padding-left: 18px;
-      color: #1f2937;
-      font-size: 0.86rem;
-      line-height: 1.55;
-    }
-    .prompt-guide-list li + li {
-      margin-top: 8px;
-    }
-    .prompt-guide-example {
-      margin-top: 12px;
-      border: 1px solid #dbeafe;
-      background: #eff6ff;
-      border-radius: 8px;
-      padding: 10px;
-      font-size: 0.8rem;
-      line-height: 1.5;
-      color: #1e3a8a;
-      white-space: pre-wrap;
-    }
     .app-settings-grid {
       display: grid;
       gap: 10px;
@@ -1226,7 +1256,7 @@
             <div class="form-group">
               <div class="prompt-label-row">
                 <label for="prompt">任务提示词</label>
-                <button type="button" class="prompt-guide-btn" id="prompt-guide-btn">更多详情</button>
+                <button type="button" class="prompt-history-open-btn" id="prompt-history-btn">历史记录</button>
               </div>
               <div class="prompt-editor-wrap">
                 <textarea id="prompt" placeholder="目标：一句话说明要实现什么
@@ -1370,44 +1400,28 @@
     </div>
   </div>
 
-  <!-- Prompt Guide Modal -->
-  <div class="modal hidden" id="prompt-guide-modal">
-    <div class="modal-content">
+  <!-- Prompt History Modal -->
+  <div class="modal hidden" id="prompt-history-modal">
+    <div class="modal-content wide">
       <div class="modal-header">
-        <h2 class="modal-title">提示词高级示例</h2>
-        <button class="modal-close-btn" id="prompt-guide-close-btn" aria-label="关闭">×</button>
+        <h2 class="modal-title">提示词历史记录</h2>
+        <button class="modal-close-btn" id="prompt-history-close-btn" aria-label="关闭">×</button>
       </div>
       <div class="modal-body">
-        <p class="prompt-guide-intro">高质量提示词重点：明确验收、阶段推进、自纠错闭环，并设置迭代上限避免无限循环。</p>
-        <ul class="prompt-guide-list">
-          <li>写清完成标准：功能、测试、文档都要可验证，最后输出固定承诺词。</li>
-          <li>拆分增量阶段：每轮只做一个小目标，完成后再进入下一阶段。</li>
-          <li>要求自我修复：测试失败要定位原因、修复并重试，不通过不能跳步。</li>
-          <li>给出兜底策略：多轮仍失败时输出阻塞点、已尝试方案和建议下一步。</li>
-        </ul>
-        <div class="prompt-guide-example">实现 Todo REST API（Node.js）。
-
-完成标准：
-- CRUD 接口全部可用并通过输入校验
-- 测试覆盖率 >= 80%，lint 无错误
-- README 包含启动方式与接口示例
-
-执行流程：
-1. 先写失败测试
-2. 最小实现让测试通过
-3. 运行测试与 lint
-4. 失败则定位并修复后重试
-5. 通过后再进入下一项
-
-若连续 12 轮仍未完成：
-- 输出阻塞原因
-- 列出已尝试方案
-- 给出建议的人工介入点
-
-全部完成后输出：&lt;promise&gt;阶段工作结束&lt;/promise&gt;</div>
+        <div class="prompt-history-head">
+          <span class="prompt-history-title">按最近使用时间排序</span>
+          <span class="prompt-history-empty" id="prompt-history-empty">暂无历史记录</span>
+        </div>
+        <div class="prompt-history-actions">
+          <select id="prompt-history-select" class="prompt-history-select" disabled>
+            <option value="">暂无历史记录</option>
+          </select>
+          <button type="button" id="prompt-history-apply-btn" class="prompt-history-apply-btn" disabled>回填到编辑区</button>
+        </div>
+        <pre id="prompt-history-preview" class="prompt-history-preview">请选择一条历史提示词进行预览</pre>
       </div>
       <div class="modal-footer">
-        <button type="button" class="modal-save-btn" id="prompt-guide-ok-btn">我知道了</button>
+        <button type="button" class="modal-cancel-btn" id="prompt-history-cancel-btn">关闭</button>
       </div>
     </div>
   </div>

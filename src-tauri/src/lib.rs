@@ -47,6 +47,13 @@ const DEFAULT_PROMPT: &str = "创建一个优秀的团队来实践工作，阅�
 const DEFAULT_MAX_ITERATIONS: u32 = 20;
 const CLAUDE_SETTINGS_DIR_NAME: &str = "claude-settings";
 const CLAUDE_PROJECT_SETTINGS_FILE_NAME: &str = "settings.local.json";
+const PROMPT_HISTORY_LIMIT: usize = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptHistoryEntry {
+    pub prompt: String,
+    pub used_at: DateTime<Utc>,
+}
 
 /// Project data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +65,8 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_prompt: Option<String>,
+    #[serde(default)]
+    pub prompt_history: Vec<PromptHistoryEntry>,
     pub max_iterations: Option<u32>,
     pub completion_promise: Option<String>,
     pub claude_setting_id: Option<String>,
@@ -550,7 +559,10 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session_id: String) {
                         push_output_chunk(&session_id, flushed);
                         pending_bytes.clear();
                     }
-                    push_output_chunk(&session_id, "\n[system] loop process output stream closed.\n".to_string());
+                    push_output_chunk(
+                        &session_id,
+                        "\r\n[system] loop process output stream closed.\r\n".to_string(),
+                    );
                     clear_loop_state_for_session(&session_id);
                     break;
                 }
@@ -580,7 +592,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session_id: String) {
                                     pending_bytes.drain(..remove_len);
                                     push_output_chunk(
                                         &session_id,
-                                        "\n[system] skipped undecodable output bytes.\n".to_string(),
+                                        "\r\n[system] skipped undecodable output bytes.\r\n".to_string(),
                                     );
                                     continue;
                                 }
@@ -592,7 +604,10 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session_id: String) {
                     }
                 }
                 Err(err) => {
-                    push_output_chunk(&session_id, format!("\n[system] output read error: {}\n", err));
+                    push_output_chunk(
+                        &session_id,
+                        format!("\r\n[system] output read error: {}\r\n", err),
+                    );
                     clear_loop_state_for_session(&session_id);
                     break;
                 }
@@ -1299,7 +1314,7 @@ async fn start_loop(
 
     push_output_chunk(
         &session_id,
-        format!("[system] loop process started, pid={:?}, session={}\n", pid, session_id),
+        format!("\r\n[system] loop process started, pid={:?}, session={}\r\n", pid, session_id),
     );
     spawn_output_reader(reader, session_id.clone());
 
@@ -1346,7 +1361,7 @@ fn stop_loop(project_id: Option<String>, session_id: Option<String>) -> Result<S
     push_output_chunk(
         &detached_session_id,
         format!(
-            "\n[system] loop process stopped, project={}, pid={:?}, session={}\n",
+            "\r\n[system] loop process stopped, project={}, pid={:?}, session={}\r\n",
             detached_project_id, pid, detached_session_id
         ),
     );
@@ -1438,6 +1453,7 @@ async fn create_project(
         created_at: Utc::now(),
         updated_at: Utc::now(),
         last_prompt: None,
+        prompt_history: vec![],
         max_iterations: None,
         completion_promise: None,
         claude_setting_id: resolved_claude_setting_id,
@@ -1866,6 +1882,75 @@ async fn update_project(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+/// Records one prompt usage entry for the project and keeps de-duplicated history.
+async fn record_prompt_usage(project_id: String, prompt: String) -> Result<Project, String> {
+    let mut state = PROJECT_STATE.lock().await;
+
+    state.ensure_initialized().await.map_err(|err| {
+        log::error!("[record_prompt_usage] failed to initialize: {}", err);
+        err
+    })?;
+
+    let normalized_project_id = project_id.trim().to_string();
+    if normalized_project_id.is_empty() {
+        return Err("project_id 不能为空".to_string());
+    }
+
+    let normalized_prompt = prompt.trim().to_string();
+    if normalized_prompt.is_empty() {
+        return Err("提示词不能为空".to_string());
+    }
+
+    let previous_project = state
+        .config
+        .projects
+        .get(&normalized_project_id)
+        .cloned()
+        .ok_or_else(|| format!("项目不存在: {}", normalized_project_id))?;
+
+    let now = Utc::now();
+    let updated_project = {
+        let project = state
+            .config
+            .projects
+            .get_mut(&normalized_project_id)
+            .ok_or_else(|| format!("项目不存在: {}", normalized_project_id))?;
+
+        project
+            .prompt_history
+            .retain(|item| item.prompt.trim() != normalized_prompt);
+        project.prompt_history.push(PromptHistoryEntry {
+            prompt: normalized_prompt.clone(),
+            used_at: now,
+        });
+        project
+            .prompt_history
+            .sort_by(|left, right| right.used_at.cmp(&left.used_at));
+        if project.prompt_history.len() > PROMPT_HISTORY_LIMIT {
+            project.prompt_history.truncate(PROMPT_HISTORY_LIMIT);
+        }
+        project.last_prompt = Some(normalized_prompt.clone());
+        project.updated_at = now;
+        project.clone()
+    };
+
+    if let Err(err) = state.save_config().await {
+        state
+            .config
+            .projects
+            .insert(normalized_project_id.clone(), previous_project);
+        log::error!(
+            "[record_prompt_usage] failed to save config for project {}: {}",
+            normalized_project_id,
+            err
+        );
+        return Err(err);
+    }
+
+    Ok(updated_project)
+}
+
+#[tauri::command(rename_all = "snake_case")]
 /// Delete a project
 async fn delete_project(project_id: String) -> Result<String, String> {
     let mut state = PROJECT_STATE.lock().await;
@@ -2010,6 +2095,7 @@ pub fn run() {
             update_claude_settings_file,
             delete_claude_settings_file,
             update_project,
+            record_prompt_usage,
             delete_project,
             set_current_project,
             get_current_project,
@@ -2050,6 +2136,7 @@ mod tests {
           "created_at": "2024-01-01T00:00:00Z",
           "updated_at": "2024-01-01T00:00:00Z",
           "last_prompt": null,
+          "prompt_history": [],
           "max_iterations": null,
           "completion_promise": null,
           "claude_setting_id": null
@@ -2072,6 +2159,7 @@ mod tests {
           "created_at": "2024-01-01T00:00:00Z",
           "updated_at": "2024-01-01T00:00:00Z",
           "last_prompt": null,
+          "prompt_history": [],
           "max_iterations": null,
           "completion_promise": null,
           "claude_setting_id": null,
@@ -2081,5 +2169,26 @@ mod tests {
 
         let project: Project = serde_json::from_str(raw).expect("project json should parse");
         assert!(project.enabled);
+    }
+
+    #[test]
+    fn project_prompt_history_defaults_to_empty_when_missing_in_json() {
+        let raw = r#"
+        {
+          "id": "p3",
+          "name": "demo3",
+          "description": "desc",
+          "work_directory": "/tmp/demo3",
+          "created_at": "2024-01-01T00:00:00Z",
+          "updated_at": "2024-01-01T00:00:00Z",
+          "last_prompt": null,
+          "max_iterations": null,
+          "completion_promise": null,
+          "claude_setting_id": null
+        }
+        "#;
+
+        let project: Project = serde_json::from_str(raw).expect("project json should parse");
+        assert!(project.prompt_history.is_empty());
     }
 }

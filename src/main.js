@@ -462,10 +462,14 @@ const appToast = document.getElementById('app-toast');
 const runningSessionsContainer = document.getElementById('running-sessions');
 const runningSessionsList = document.getElementById('running-sessions-list');
 const promptAiOptimizeBtn = document.getElementById('prompt-ai-optimize-btn');
-const promptGuideBtn = document.getElementById('prompt-guide-btn');
-const promptGuideModal = document.getElementById('prompt-guide-modal');
-const promptGuideCloseBtn = document.getElementById('prompt-guide-close-btn');
-const promptGuideOkBtn = document.getElementById('prompt-guide-ok-btn');
+const promptHistoryBtn = document.getElementById('prompt-history-btn');
+const promptHistoryModal = document.getElementById('prompt-history-modal');
+const promptHistorySelect = document.getElementById('prompt-history-select');
+const promptHistoryApplyBtn = document.getElementById('prompt-history-apply-btn');
+const promptHistoryCloseBtn = document.getElementById('prompt-history-close-btn');
+const promptHistoryCancelBtn = document.getElementById('prompt-history-cancel-btn');
+const promptHistoryEmpty = document.getElementById('prompt-history-empty');
+const promptHistoryPreview = document.getElementById('prompt-history-preview');
 const appSettingsBtn = document.getElementById('app-settings-btn');
 const appSettingsModal = document.getElementById('app-settings-modal');
 const appSettingsCloseBtn = document.getElementById('app-settings-close-btn');
@@ -485,21 +489,123 @@ const taskPlanCancelBtn = document.getElementById('task-plan-cancel-btn');
 const taskPlanConfirmBtn = document.getElementById('task-plan-confirm-btn');
 const taskPlanSummary = document.getElementById('task-plan-summary');
 const taskPlanList = document.getElementById('task-plan-list');
+let currentPromptHistoryEntries = [];
 
-function openPromptGuideModal() {
-  if (!promptGuideModal) {
-    return;
-  }
-  promptGuideModal.classList.remove('hidden');
-  promptGuideModal.classList.add('visible');
+function getPromptHistoryEntries(project) {
+  const entries = Array.isArray(project?.prompt_history) ? project.prompt_history : [];
+  return entries
+    .filter((entry) => typeof entry?.prompt === 'string' && entry.prompt.trim())
+    .map((entry) => ({
+      prompt: entry.prompt,
+      used_at: entry.used_at || null,
+    }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.used_at || '') || 0;
+      const rightTime = Date.parse(right.used_at || '') || 0;
+      return rightTime - leftTime;
+    });
 }
 
-function closePromptGuideModal() {
-  if (!promptGuideModal) {
+function formatPromptHistoryTime(isoTime) {
+  const timestamp = Date.parse(isoTime || '');
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return '--';
+  }
+  const date = new Date(timestamp);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+}
+
+function summarizePromptForOption(prompt) {
+  const singleLine = String(prompt || '').replace(/\s+/g, ' ').trim();
+  if (!singleLine) {
+    return '(空提示词)';
+  }
+  return singleLine.length > 56 ? `${singleLine.slice(0, 56)}...` : singleLine;
+}
+
+function renderPromptHistoryPreview() {
+  if (!promptHistoryPreview || !promptHistorySelect) {
     return;
   }
-  promptGuideModal.classList.remove('visible');
-  promptGuideModal.classList.add('hidden');
+  const index = parseInt(promptHistorySelect.value, 10);
+  if (!Number.isInteger(index) || index < 0 || index >= currentPromptHistoryEntries.length) {
+    promptHistoryPreview.textContent = '请选择一条历史提示词进行预览';
+    return;
+  }
+  promptHistoryPreview.textContent = currentPromptHistoryEntries[index]?.prompt || '请选择一条历史提示词进行预览';
+}
+
+function renderPromptHistory(project) {
+  if (!promptHistorySelect || !promptHistoryApplyBtn || !promptHistoryEmpty) {
+    return;
+  }
+
+  currentPromptHistoryEntries = getPromptHistoryEntries(project);
+  promptHistorySelect.innerHTML = '';
+
+  if (currentPromptHistoryEntries.length === 0) {
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = '暂无历史记录';
+    promptHistorySelect.appendChild(emptyOption);
+    promptHistorySelect.disabled = true;
+    promptHistoryApplyBtn.disabled = true;
+    promptHistoryEmpty.textContent = '暂无历史记录';
+    renderPromptHistoryPreview();
+    return;
+  }
+
+  currentPromptHistoryEntries.forEach((entry, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${formatPromptHistoryTime(entry.used_at)} | ${summarizePromptForOption(entry.prompt)}`;
+    promptHistorySelect.appendChild(option);
+  });
+
+  promptHistorySelect.value = '0';
+  promptHistorySelect.disabled = false;
+  promptHistoryApplyBtn.disabled = false;
+  promptHistoryEmpty.textContent = `共 ${currentPromptHistoryEntries.length} 条`;
+  renderPromptHistoryPreview();
+}
+
+function handlePromptHistoryApply() {
+  if (!promptInput || !promptHistorySelect || !projectManager?.getCurrentProject()) {
+    return;
+  }
+  const index = parseInt(promptHistorySelect.value, 10);
+  if (!Number.isInteger(index) || index < 0 || index >= currentPromptHistoryEntries.length) {
+    return;
+  }
+  const selectedPrompt = currentPromptHistoryEntries[index]?.prompt;
+  if (!selectedPrompt) {
+    return;
+  }
+  promptInput.value = selectedPrompt;
+  queueProjectAutoSave('prompt-history-apply', { force: true });
+  closePromptHistoryModal();
+}
+
+function openPromptHistoryModal() {
+  if (!promptHistoryModal) {
+    return;
+  }
+  promptHistoryModal.classList.remove('hidden');
+  promptHistoryModal.classList.add('visible');
+  renderPromptHistoryPreview();
+}
+
+function closePromptHistoryModal() {
+  if (!promptHistoryModal) {
+    return;
+  }
+  promptHistoryModal.classList.remove('visible');
+  promptHistoryModal.classList.add('hidden');
 }
 
 async function refreshAppDefaultClaudeSettingOptions(selectedId = appUISettings.defaultClaudeSettingId) {
@@ -1551,6 +1657,7 @@ function handleProjectChange(project) {
     promptInput.value = project.last_prompt || appUISettings.defaultPrompt || '';
     maxIterationsInput.value = project.max_iterations?.toString() || String(appUISettings.defaultMaxIterations);
     completionPromiseInput.value = project.completion_promise || '';
+    renderPromptHistory(project);
   } else {
     currentProjectEnabled = false;
     // Clear form when no project selected
@@ -1558,6 +1665,7 @@ function handleProjectChange(project) {
     promptInput.value = appUISettings.defaultPrompt || '';
     maxIterationsInput.value = String(appUISettings.defaultMaxIterations);
     completionPromiseInput.value = '';
+    renderPromptHistory(null);
   }
 
   renderSelectedProjectTerminalHistory(project);
@@ -1818,7 +1926,31 @@ async function handleStart(options = {}) {
   completionPromiseInput.disabled = true;
 
   const workDir = workDirInput.value || currentProject.work_directory;
-  const prompt = promptInput.value || null;
+  const prompt = promptInput.value || currentProject.last_prompt || appUISettings.defaultPrompt || null;
+  const promptForHistory = String(prompt || '').trim();
+  if (promptForHistory) {
+    try {
+      const updatedProject = await invokeWithDebug('record_prompt_usage', {
+        project_id: targetProjectId,
+        prompt: promptForHistory
+      });
+      if (projectManager?.syncProjectSnapshot) {
+        projectManager.syncProjectSnapshot(updatedProject);
+      }
+      currentProject = updatedProject || currentProject;
+      renderPromptHistory(currentProject);
+    } catch (err) {
+      appendDebugLog('record prompt history failed', err);
+      alert(`记录提示词历史失败: ${serializeDebugValue(err)}`);
+      syncUI();
+      workDirInput.disabled = false;
+      promptInput.disabled = false;
+      maxIterationsInput.disabled = false;
+      completionPromiseInput.disabled = false;
+      return;
+    }
+  }
+
   const parsedIterations = maxIterationsInput.value ? parseInt(maxIterationsInput.value, 10) : null;
   const maxIterations = Number.isInteger(parsedIterations) && parsedIterations > 0
     ? parsedIterations
@@ -2215,19 +2347,31 @@ if (hardStopTimeoutInput) {
 if (promptAiOptimizeBtn) {
   promptAiOptimizeBtn.addEventListener('click', handlePromptAiOptimize);
 }
-if (promptGuideBtn) {
-  promptGuideBtn.addEventListener('click', openPromptGuideModal);
+if (promptHistoryBtn) {
+  promptHistoryBtn.addEventListener('click', openPromptHistoryModal);
 }
-if (promptGuideCloseBtn) {
-  promptGuideCloseBtn.addEventListener('click', closePromptGuideModal);
+if (promptHistoryApplyBtn) {
+  promptHistoryApplyBtn.addEventListener('click', handlePromptHistoryApply);
 }
-if (promptGuideOkBtn) {
-  promptGuideOkBtn.addEventListener('click', closePromptGuideModal);
+if (promptHistorySelect) {
+  promptHistorySelect.addEventListener('change', () => {
+    const hasSelection = Boolean(promptHistorySelect.value);
+    if (promptHistoryApplyBtn) {
+      promptHistoryApplyBtn.disabled = !hasSelection;
+    }
+    renderPromptHistoryPreview();
+  });
 }
-if (promptGuideModal) {
-  promptGuideModal.addEventListener('click', (event) => {
-    if (event.target === promptGuideModal) {
-      closePromptGuideModal();
+if (promptHistoryCloseBtn) {
+  promptHistoryCloseBtn.addEventListener('click', closePromptHistoryModal);
+}
+if (promptHistoryCancelBtn) {
+  promptHistoryCancelBtn.addEventListener('click', closePromptHistoryModal);
+}
+if (promptHistoryModal) {
+  promptHistoryModal.addEventListener('click', (event) => {
+    if (event.target === promptHistoryModal) {
+      closePromptHistoryModal();
     }
   });
 }
@@ -2280,8 +2424,8 @@ window.addEventListener('keydown', (event) => {
     closeAppSettingsModal();
     return;
   }
-  if (promptGuideModal?.classList.contains('visible')) {
-    closePromptGuideModal();
+  if (promptHistoryModal?.classList.contains('visible')) {
+    closePromptHistoryModal();
   }
 });
 window.addEventListener('error', handleWindowError);
