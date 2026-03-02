@@ -455,8 +455,10 @@ const terminalOutput = document.getElementById('terminal-output');
 const terminalInput = document.getElementById('terminal-input');
 const sendBtn = document.getElementById('send-btn');
 const debugLog = document.getElementById('debug-log');
+const tabSettings = document.getElementById('tab-settings');
 const tabTerminal = document.getElementById('tab-terminal');
 const tabDebug = document.getElementById('tab-debug');
+const panelSettings = document.getElementById('panel-settings');
 const panelTerminal = document.getElementById('panel-terminal');
 const panelDebug = document.getElementById('panel-debug');
 const appToast = document.getElementById('app-toast');
@@ -1057,17 +1059,21 @@ async function initTerminal() {
 }
 
 /**
- * Switches between terminal and debug log tabs.
+ * Switches between settings, terminal and debug log tabs.
  */
 function switchLogTab(tab) {
-  const showTerminal = tab === 'terminal';
-  panelTerminal.hidden = !showTerminal;
-  panelDebug.hidden = showTerminal;
-  tabTerminal.classList.toggle('active', showTerminal);
-  tabDebug.classList.toggle('active', !showTerminal);
+  // Hide all panels
+  panelSettings.hidden = tab !== 'settings';
+  panelTerminal.hidden = tab !== 'terminal';
+  panelDebug.hidden = tab !== 'debug';
+
+  // Update tab button active states
+  tabSettings.classList.toggle('active', tab === 'settings');
+  tabTerminal.classList.toggle('active', tab === 'terminal');
+  tabDebug.classList.toggle('active', tab === 'debug');
 
   // Focus terminal when switching to terminal tab
-  if (showTerminal && terminalComponent) {
+  if (tab === 'terminal' && terminalComponent) {
     terminalComponent.focus();
   }
 }
@@ -2124,6 +2130,7 @@ toggleBtn.addEventListener('click', handleToggle);
 startBtn.addEventListener('click', handleStart);
 stopBtn.addEventListener('click', handleStop);
 sendBtn.addEventListener('click', handleSendInput);
+tabSettings.addEventListener('click', () => switchLogTab('settings'));
 tabTerminal.addEventListener('click', () => switchLogTab('terminal'));
 tabDebug.addEventListener('click', () => switchLogTab('debug'));
 terminalInput.addEventListener('keydown', (event) => {

@@ -749,8 +749,18 @@ export class ProjectManager {
   async loadProjects() {
     try {
       console.log('[ProjectManager] loading projects...');
-      this.projects = await this.invoke('get_projects');
+      const loadedProjects = await this.invoke('get_projects');
+      this.projects = Array.isArray(loadedProjects) ? loadedProjects : [];
       console.log('[ProjectManager] loaded', this.projects.length, 'projects');
+
+      if (this.projects.length === 0 && this.currentProject) {
+        this.currentProject = null;
+        this.updateCurrentProjectDisplay();
+        if (this.onProjectChange) {
+          this.onProjectChange(null);
+        }
+      }
+
       this.renderProjectList();
 
       if (this.onProjectsUpdate) {
@@ -768,9 +778,25 @@ export class ProjectManager {
   async loadCurrentProject() {
     try {
       console.log('[ProjectManager] loading current project...');
-      this.currentProject = await this.invoke('get_current_project');
+      const loadedCurrentProject = await this.invoke('get_current_project');
+      const hasProjects = this.projects.length > 0;
+      if (!hasProjects || !loadedCurrentProject) {
+        this.currentProject = null;
+      } else {
+        const matchedProject = this.projects.find((project) => project.id === loadedCurrentProject.id);
+        if (!matchedProject) {
+          console.warn(
+            '[ProjectManager] current project not found in project list, fallback to empty selection:',
+            loadedCurrentProject.id
+          );
+          this.currentProject = null;
+        } else {
+          this.currentProject = matchedProject;
+        }
+      }
       console.log('[ProjectManager] current project:', this.currentProject?.name || 'none');
       this.updateCurrentProjectDisplay();
+      this.renderProjectList();
 
       if (this.onProjectChange) {
         this.onProjectChange(this.currentProject);
@@ -1448,9 +1474,19 @@ export class ProjectManager {
 
     await this.loadProjects();
     await this.loadCurrentProject();
+
+    // Auto-select first project if no current project is set
+    console.log('[ProjectManager] checking auto-select: currentProject =', this.currentProject, 'projects.length =', this.projects.length);
+    if (!this.currentProject && this.projects.length > 0) {
+      console.log('[ProjectManager] no current project, auto-selecting first project:', this.projects[0].name, 'id =', this.projects[0].id);
+      await this.setCurrentProject(this.projects[0].id);
+    } else {
+      console.log('[ProjectManager] auto-select skipped: currentProject exists =', !!this.currentProject, 'projects.length =', this.projects.length);
+    }
+
     this.refreshIcons();
 
-    console.log('[ProjectManager] initialization complete');
+    console.log('[ProjectManager] initialization complete, currentProject =', this.currentProject?.name || 'none');
   }
 }
 

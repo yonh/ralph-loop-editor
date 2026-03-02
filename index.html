@@ -1246,11 +1246,19 @@
 
     <div class="logs-tabs">
       <div class="tabs-header">
-        <button class="tab-btn active" id="tab-terminal" data-tab="terminal"><i data-lucide="terminal"></i> 循环终端</button>
+        <button class="tab-btn active" id="tab-settings" data-tab="settings"><i data-lucide="settings"></i> 任务设置</button>
+        <button class="tab-btn" id="tab-terminal" data-tab="terminal"><i data-lucide="terminal"></i> 循环终端</button>
         <button class="tab-btn" id="tab-debug" data-tab="debug"><i data-lucide="bug"></i> 调试日志</button>
       </div>
 
-      <section class="tab-panel" id="panel-terminal">
+      <section class="tab-panel" id="panel-settings">
+        <div style="padding: 20px; color: #64748b; text-align: center;">
+          <p>任务设置面板 - 功能开发中</p>
+          <p style="font-size: 0.9rem; margin-top: 10px;">这里将包含：任务提示词、完成承诺标记、循环次数、空闲切换、硬中断等配置项</p>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="panel-terminal" hidden>
         <div class="terminal-panel" style="margin-top: 0; border: none; border-radius: 0;">
           <div id="terminal-output"></div>
           <div class="terminal-input-row">
