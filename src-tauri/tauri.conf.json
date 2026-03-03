@@ -14,11 +14,11 @@
       {
         "title": "Ralph Loop Editor",
         "width": 1350,
-        "height": 1300,
+        "height": 900,
         "resizable": true,
         "fullscreen": false,
         "minWidth": 1350,
-        "minHeight": 1300
+        "minHeight": 900
       }
     ],
     "security": {

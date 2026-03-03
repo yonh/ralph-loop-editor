@@ -85,6 +85,7 @@ const DEFAULT_PROMPT_OPTIMIZE_PRESET = `请将以下任务目标改写为可执�
 const DEFAULT_APP_UI_SETTINGS = Object.freeze({
   defaultPrompt: '',
   defaultMaxIterations: 20,
+  claudeCliPath: 'claude',
   defaultClaudeSettingId: '',
   optimizePreset: DEFAULT_PROMPT_OPTIMIZE_PRESET,
   optimizeProvider: 'anthropic',
@@ -114,6 +115,9 @@ function normalizeAppUISettings(rawSettings = {}) {
   return {
     defaultPrompt: typeof rawSettings.defaultPrompt === 'string' ? rawSettings.defaultPrompt : '',
     defaultMaxIterations: normalizedIterations,
+    claudeCliPath: typeof rawSettings.claudeCliPath === 'string' && rawSettings.claudeCliPath.trim()
+      ? rawSettings.claudeCliPath.trim()
+      : DEFAULT_APP_UI_SETTINGS.claudeCliPath,
     defaultClaudeSettingId: typeof rawSettings.defaultClaudeSettingId === 'string'
       ? rawSettings.defaultClaudeSettingId.trim()
       : '',
@@ -157,6 +161,33 @@ function saveAppUISettingsToStorage(settings) {
 
 function initializeAppUISettings() {
   appUISettings = loadAppUISettingsFromStorage();
+}
+
+async function autoDetectClaudeCliPathIfNeeded() {
+  if (!invoke) {
+    return;
+  }
+
+  const currentPath = String(appUISettings.claudeCliPath || '').trim();
+  if (currentPath && currentPath !== DEFAULT_APP_UI_SETTINGS.claudeCliPath) {
+    return;
+  }
+
+  try {
+    const detectedPath = await invokeWithDebug('detect_claude_cli_path');
+    const normalizedDetected = typeof detectedPath === 'string' ? detectedPath.trim() : '';
+    if (!normalizedDetected || normalizedDetected === currentPath) {
+      return;
+    }
+    appUISettings = normalizeAppUISettings({
+      ...appUISettings,
+      claudeCliPath: normalizedDetected
+    });
+    saveAppUISettingsToStorage(appUISettings);
+    appendDebugLog('已自动检测 Claude CLI 路径', { claude_cli_path: normalizedDetected });
+  } catch (error) {
+    appendDebugLog('自动检测 Claude CLI 路径失败（保留默认值）', error);
+  }
 }
 
 function generateDetailedTaskList(promptText) {
@@ -477,12 +508,14 @@ const appSettingsCancelBtn = document.getElementById('app-settings-cancel-btn');
 const appSettingsSaveBtn = document.getElementById('app-settings-save-btn');
 const appDefaultPromptInput = document.getElementById('app-default-prompt');
 const appDefaultMaxIterationsInput = document.getElementById('app-default-max-iterations');
+const appClaudeCliPathInput = document.getElementById('app-claude-cli-path');
 const appDefaultClaudeSettingSelect = document.getElementById('app-default-claude-setting');
 const appOptimizePresetInput = document.getElementById('app-optimize-preset');
 const appOptimizeProviderSelect = document.getElementById('app-optimize-provider');
 const appOptimizeBaseUrlInput = document.getElementById('app-optimize-base-url');
 const appOptimizeModelInput = document.getElementById('app-optimize-model');
 const appOptimizeApiKeyInput = document.getElementById('app-optimize-api-key');
+const appOptimizeApiKeyToggleBtn = document.getElementById('app-optimize-api-key-toggle');
 const taskPlanModal = document.getElementById('task-plan-modal');
 const taskPlanCloseBtn = document.getElementById('task-plan-close-btn');
 const taskPlanCancelBtn = document.getElementById('task-plan-cancel-btn');
@@ -662,6 +695,9 @@ async function openAppSettingsModal() {
   if (appDefaultMaxIterationsInput) {
     appDefaultMaxIterationsInput.value = String(appUISettings.defaultMaxIterations);
   }
+  if (appClaudeCliPathInput) {
+    appClaudeCliPathInput.value = appUISettings.claudeCliPath || DEFAULT_APP_UI_SETTINGS.claudeCliPath;
+  }
   if (appOptimizePresetInput) {
     appOptimizePresetInput.value = appUISettings.optimizePreset;
   }
@@ -686,6 +722,14 @@ function closeAppSettingsModal() {
   if (!appSettingsModal) {
     return;
   }
+  if (appOptimizeApiKeyInput) {
+    appOptimizeApiKeyInput.type = 'password';
+  }
+  if (appOptimizeApiKeyToggleBtn) {
+    appOptimizeApiKeyToggleBtn.textContent = '显示';
+    appOptimizeApiKeyToggleBtn.setAttribute('aria-pressed', 'false');
+    appOptimizeApiKeyToggleBtn.setAttribute('aria-label', '显示 API Key');
+  }
   appSettingsModal.classList.remove('visible');
   appSettingsModal.classList.add('hidden');
 }
@@ -694,6 +738,7 @@ function saveAppSettingsFromModal() {
   if (
     !appDefaultPromptInput
     || !appDefaultMaxIterationsInput
+    || !appClaudeCliPathInput
     || !appOptimizePresetInput
     || !appDefaultClaudeSettingSelect
   ) {
@@ -703,6 +748,7 @@ function saveAppSettingsFromModal() {
   const draftSettings = normalizeAppUISettings({
     defaultPrompt: appDefaultPromptInput.value,
     defaultMaxIterations: appDefaultMaxIterationsInput.value,
+    claudeCliPath: appClaudeCliPathInput.value,
     defaultClaudeSettingId: appDefaultClaudeSettingSelect.value,
     optimizePreset: appOptimizePresetInput.value,
     optimizeProvider: appOptimizeProviderSelect?.value || 'anthropic',
@@ -1721,6 +1767,7 @@ async function init() {
     await initTerminal();
     invoke = getInvoke();
     initializeAppUISettings();
+    await autoDetectClaudeCliPathIfNeeded();
     appendDebugLog('tauri runtime detected');
 
     // Initialize project manager
@@ -1927,6 +1974,8 @@ async function handleStart(options = {}) {
 
   const workDir = workDirInput.value || currentProject.work_directory;
   const prompt = promptInput.value || currentProject.last_prompt || appUISettings.defaultPrompt || null;
+  const claudeCliPath = String(appUISettings.claudeCliPath || DEFAULT_APP_UI_SETTINGS.claudeCliPath).trim()
+    || DEFAULT_APP_UI_SETTINGS.claudeCliPath;
   const promptForHistory = String(prompt || '').trim();
   if (promptForHistory) {
     try {
@@ -1989,6 +2038,7 @@ async function handleStart(options = {}) {
     await invokeWithDebug('start_loop', {
       project_id: targetProjectId,
       work_dir: workDir,
+      claude_path: claudeCliPath,
       prompt,
       max_iterations: maxIterations,
       completion_promise: completionPromise
@@ -2388,6 +2438,15 @@ if (appSettingsCancelBtn) {
 }
 if (appSettingsSaveBtn) {
   appSettingsSaveBtn.addEventListener('click', saveAppSettingsFromModal);
+}
+if (appOptimizeApiKeyToggleBtn && appOptimizeApiKeyInput) {
+  appOptimizeApiKeyToggleBtn.addEventListener('click', () => {
+    const willShow = appOptimizeApiKeyInput.type === 'password';
+    appOptimizeApiKeyInput.type = willShow ? 'text' : 'password';
+    appOptimizeApiKeyToggleBtn.textContent = willShow ? '隐藏' : '显示';
+    appOptimizeApiKeyToggleBtn.setAttribute('aria-pressed', willShow ? 'true' : 'false');
+    appOptimizeApiKeyToggleBtn.setAttribute('aria-label', willShow ? '隐藏 API Key' : '显示 API Key');
+  });
 }
 if (appSettingsModal) {
   appSettingsModal.addEventListener('click', (event) => {

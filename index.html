@@ -127,6 +127,7 @@
     .project-list {
       flex: 1;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 16px;
     }
     .sidebar-footer {
@@ -175,22 +176,24 @@
       background: #f0f9ff;
     }
     
-    .project-info {
-      margin-bottom: 12px;
-    }
-    
     .project-name {
       font-weight: 600;
       color: #1e293b;
       font-size: 1rem;
-      margin-bottom: 4px;
+      margin-bottom: 0;
     }
 
     .project-name-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 4px;
+      margin-bottom: 0;
+      min-width: 0;
+    }
+
+    .project-meta {
+      margin-bottom: 12px;
+      min-width: 0;
     }
 
     .project-enabled-badge {
@@ -222,12 +225,29 @@
       font-size: 0.85rem;
       margin-bottom: 4px;
       line-height: 1.4;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     
     .project-work-dir {
       color: #94a3b8;
       font-size: 0.8rem;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      min-width: 0;
+      overflow: hidden;
+      white-space: normal;
+      word-break: normal;
+      overflow-wrap: normal;
+    }
+
+    .project-work-dir-path {
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
     }
     
     .project-actions {
@@ -291,7 +311,7 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      padding: 24px;
+      padding: 12px;
     }
     
     @media (max-width: 1024px) {
@@ -409,7 +429,7 @@
       position: relative;
     }
     .prompt-editor-wrap textarea {
-      min-height: 138px;
+      min-height: 300px;
       padding-bottom: 42px;
     }
     .prompt-history-head {
@@ -432,9 +452,14 @@
       display: flex;
       gap: 8px;
       align-items: center;
+      width: 100%;
+      min-width: 0;
     }
     .prompt-history-select {
+      flex: 1 1 auto;
       min-width: 0;
+      width: auto;
+      max-width: 100%;
       font-size: 0.84rem;
       padding: 8px 10px;
     }
@@ -458,7 +483,8 @@
     .prompt-history-preview {
       min-height: 200px;
       max-height: 300px;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border: 1px solid #dbeafe;
       border-radius: 8px;
       background: #f8fbff;
@@ -466,6 +492,8 @@
       font-size: 0.84rem;
       line-height: 1.5;
       white-space: pre-wrap;
+      word-break: break-word;
+      overflow-wrap: anywhere;
       padding: 10px;
       margin-top: 8px;
     }
@@ -500,7 +528,7 @@
       color: #333;
       font-size: 0.9rem;
     }
-    input[type="text"], input[type="number"], textarea, select {
+    input[type="text"], input[type="number"], input[type="password"], textarea, select {
       width: 100%;
       padding: 10px 12px;
       border: 1px solid #ddd;
@@ -509,14 +537,41 @@
       font-family: inherit;
       background: #ffffff;
     }
-    input[type="text"]:focus, input[type="number"]:focus, textarea:focus, select:focus {
+    input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus, textarea:focus, select:focus {
       outline: none;
       border-color: #667eea;
       box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
     }
-    input[type="text"]:disabled, input[type="number"]:disabled, textarea:disabled, select:disabled {
+    input[type="text"]:disabled, input[type="number"]:disabled, input[type="password"]:disabled, textarea:disabled, select:disabled {
       background: #f5f5f5;
       cursor: not-allowed;
+    }
+    .password-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+    .password-input-row input {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .password-toggle-btn {
+      border: 1px solid #cbd5e1;
+      background: #ffffff;
+      color: #334155;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .password-toggle-btn:hover:not(:disabled) {
+      background: #eef2ff;
+      border-color: #a5b4fc;
+      color: #1e3a8a;
+      opacity: 1;
     }
     .runtime-countdown {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -874,6 +929,7 @@
       max-width: 500px;
       max-height: 90vh;
       overflow-y: auto;
+      overflow-x: hidden;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
     }
     .modal-content.wide {
@@ -1095,10 +1151,9 @@
       margin-bottom: 8px;
     }
     
-    .project-header .project-info {
+    .project-header .project-name-row {
       flex: 1;
       min-width: 0;
-      margin-bottom: 0;
     }
     
     /* Toggle switch style */
@@ -1334,6 +1389,11 @@
             <input type="number" id="app-default-max-iterations" min="1" max="100" step="1" placeholder="20">
           </div>
           <div class="form-group">
+            <label for="app-claude-cli-path">Claude CLI 路径</label>
+            <input type="text" id="app-claude-cli-path" placeholder="例如：claude 或 /opt/homebrew/bin/claude">
+            <div class="app-settings-hint">用于启动循环任务时执行 Claude 命令，留空则默认使用 claude。</div>
+          </div>
+          <div class="form-group">
             <label for="app-default-claude-setting">默认大模型参数配置（Claude Setting）</label>
             <select id="app-default-claude-setting">
               <option value="">不指定（保持项目配置）</option>
@@ -1364,7 +1424,10 @@
           </div>
           <div class="form-group">
             <label for="app-optimize-api-key">AI 优化 API Key</label>
-            <input type="password" id="app-optimize-api-key" placeholder="例如：sk-xxx">
+            <div class="password-input-row">
+              <input type="password" id="app-optimize-api-key" placeholder="例如：sk-xxx" autocomplete="off">
+              <button type="button" id="app-optimize-api-key-toggle" class="password-toggle-btn" aria-label="显示 API Key" aria-pressed="false">显示</button>
+            </div>
             <div class="app-settings-hint">仅用于“AI 优化提示词”功能，保存在本地设置中。</div>
           </div>
           <div class="form-group">

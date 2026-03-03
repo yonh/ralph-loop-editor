@@ -1,5 +1,6 @@
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, LazyLock};
@@ -310,6 +311,76 @@ fn extract_anthropic_text(response_json: &Value) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+/// Returns one absolute executable path resolved from current PATH.
+fn resolve_executable_from_path(binary_name: &str) -> Option<String> {
+    let trimmed = binary_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let has_path_separator = trimmed.contains(std::path::MAIN_SEPARATOR)
+        || trimmed.contains('/')
+        || trimmed.contains('\\');
+    if has_path_separator {
+        let candidate = PathBuf::from(trimmed);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+        return None;
+    }
+
+    let path_env = env::var_os("PATH")?;
+    let path_entries: Vec<PathBuf> = env::split_paths(&path_env).collect();
+
+    #[cfg(windows)]
+    {
+        let candidate_path = Path::new(trimmed);
+        let has_extension = candidate_path.extension().is_some();
+        let pathext: Vec<String> = env::var_os("PATHEXT")
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
+            .to_string_lossy()
+            .split(';')
+            .filter_map(|item| {
+                let ext = item.trim();
+                if ext.is_empty() {
+                    None
+                } else {
+                    Some(ext.to_string())
+                }
+            })
+            .collect();
+
+        for dir in path_entries {
+            if has_extension {
+                let direct = dir.join(trimmed);
+                if direct.is_file() {
+                    return Some(direct.to_string_lossy().to_string());
+                }
+                continue;
+            }
+
+            for ext in &pathext {
+                let candidate = dir.join(format!("{}{}", trimmed, ext));
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+        return None;
+    }
+
+    #[cfg(not(windows))]
+    {
+        for dir in path_entries {
+            let candidate = dir.join(trimmed);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+        None
     }
 }
 
@@ -1077,6 +1148,12 @@ async fn optimize_prompt(work_dir: Option<String>, prompt: String) -> Result<Str
 }
 
 #[tauri::command(rename_all = "snake_case")]
+/// Detects the Claude CLI absolute path from current system PATH.
+fn detect_claude_cli_path() -> Result<Option<String>, String> {
+    Ok(resolve_executable_from_path("claude"))
+}
+
+#[tauri::command(rename_all = "snake_case")]
 /// Sends user input to the running loop process.
 fn send_loop_input(
     input: String,
@@ -1169,13 +1246,15 @@ fn resize_pty(
 async fn start_loop(
     project_id: Option<String>,
     work_dir: Option<String>,
+    claude_path: Option<String>,
     prompt: Option<String>,
     max_iterations: Option<u32>,
     completion_promise: Option<String>,
 ) -> Result<String, String> {
     log::info!(
-        "[start_loop] called with work_dir={:?}, prompt_provided={}, max_iterations={:?}, completion_promise={:?}",
+        "[start_loop] called with work_dir={:?}, claude_path={:?}, prompt_provided={}, max_iterations={:?}, completion_promise={:?}",
         work_dir,
+        claude_path,
         prompt.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
         max_iterations,
         completion_promise
@@ -1248,7 +1327,13 @@ async fn start_loop(
         command_parts.join(" ")
     );
 
-    let mut command = CommandBuilder::new("claude");
+    let resolved_claude_path = claude_path
+        .as_ref()
+        .map(|raw| raw.trim().to_string())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| "claude".to_string());
+
+    let mut command = CommandBuilder::new(&resolved_claude_path);
     command.arg("--dangerously-skip-permissions");
     command.arg(command_payload);
 
@@ -1276,7 +1361,7 @@ async fn start_loop(
     let child = pty_pair
         .slave
         .spawn_command(command)
-        .map_err(|err| format!("Failed to start loop process: {}", err))?;
+        .map_err(|err| format!("Failed to start loop process with '{}': {}", resolved_claude_path, err))?;
 
     let pid = child.process_id();
     let reader = pty_pair
@@ -2084,6 +2169,7 @@ pub fn run() {
             inspect_claude_runtime_context,
             optimize_prompt,
             optimize_prompt_api,
+            detect_claude_cli_path,
             get_project_enabled,
             set_project_enabled,
             get_runtime_debug_state,

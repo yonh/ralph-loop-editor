@@ -1023,6 +1023,11 @@ export class ProjectManager {
       div.textContent = text;
       return div.innerHTML;
     };
+    const formatPathForDisplay = (pathText) => (
+      escapeHtml(pathText)
+        .replace(/\//g, '/<wbr>')
+        .replace(/\\/g, '\\<wbr>')
+    );
 
     const isEnabled = Boolean(project.enabled);
     const toggleId = `toggle-${project.id}`;
@@ -1032,14 +1037,9 @@ export class ProjectManager {
 
     div.innerHTML = `
       <div class="project-header">
-        <div class="project-info">
-          <div class="project-name-row">
-            <div class="project-name">${escapeHtml(project.name)}</div>
-            ${enabledBadge}
-          </div>
-          <div class="project-description">${escapeHtml(project.description)}</div>
-          <div class="project-work-dir">${escapeHtml(project.work_directory)}</div>
-          ${project.claude_setting_id ? `<div class="project-work-dir">Setting: ${escapeHtml(this.getClaudeSettingName(project.claude_setting_id) || project.claude_setting_id)}</div>` : ''}
+        <div class="project-name-row">
+          <div class="project-name">${escapeHtml(project.name)}</div>
+          ${enabledBadge}
         </div>
         <div class="project-toggle-wrap${isEnabled ? ' active' : ''}">
           <span class="project-toggle-label">${isEnabled ? '启用' : '禁用'}</span>
@@ -1048,6 +1048,11 @@ export class ProjectManager {
             <span class="toggle-track"></span>
           </label>
         </div>
+      </div>
+      <div class="project-meta">
+        <div class="project-description">${escapeHtml(project.description)}</div>
+        <div class="project-work-dir project-work-dir-path">${formatPathForDisplay(project.work_directory)}</div>
+        ${project.claude_setting_id ? `<div class="project-work-dir project-work-dir-setting">Setting: ${escapeHtml(this.getClaudeSettingName(project.claude_setting_id) || project.claude_setting_id)}</div>` : ''}
       </div>
       <div class="project-actions">
         <button class="project-run-btn" title="运行项目">
