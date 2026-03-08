@@ -892,6 +892,84 @@
     .tab-panel-settings {
       background: #f8fafc;
     }
+    .git-panel {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      background: #f8fafc;
+      overflow: auto;
+    }
+    .git-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .git-repo-path {
+      font-size: 0.82rem;
+      color: #334155;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .git-refresh-btn {
+      background: #0ea5e9;
+      color: #ffffff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 8px 12px;
+      min-width: 90px;
+    }
+    .git-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      min-height: 0;
+    }
+    .git-card {
+      border: 1px solid #dbe4ee;
+      border-radius: 8px;
+      background: #ffffff;
+      display: flex;
+      flex-direction: column;
+      min-height: 160px;
+    }
+    .git-card.full {
+      grid-column: 1 / -1;
+    }
+    .git-card-title {
+      padding: 8px 10px;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #0f172a;
+      background: #f8fafc;
+    }
+    .git-content {
+      margin: 0;
+      padding: 10px;
+      font-size: 0.78rem;
+      line-height: 1.5;
+      color: #1f2937;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
+      flex: 1;
+      min-height: 0;
+    }
+    @media (max-width: 980px) {
+      .git-grid {
+        grid-template-columns: 1fr;
+      }
+      .git-card.full {
+        grid-column: auto;
+      }
+    }
     .settings-panel-scroll {
       flex: 1;
       min-height: 0;
@@ -1133,7 +1211,8 @@
     
     .new-project-btn [data-lucide], .new-project-btn .lucide, .new-project-btn svg.lucide,
     .controls button [data-lucide], .controls button .lucide, .controls button svg.lucide,
-    #send-btn [data-lucide], #send-btn .lucide, #send-btn svg.lucide {
+    #send-btn [data-lucide], #send-btn .lucide, #send-btn svg.lucide,
+    .git-refresh-btn [data-lucide], .git-refresh-btn .lucide, .git-refresh-btn svg.lucide {
       margin-right: 8px;
     }
     .sidebar-gear-btn [data-lucide], .sidebar-gear-btn .lucide, .sidebar-gear-btn svg.lucide,
@@ -1301,6 +1380,7 @@
     <div class="logs-tabs" id="workspace-tabs">
       <div class="tabs-header" role="tablist" aria-label="工作区标签页">
         <button class="tab-btn active" id="tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="panel-settings"><i data-lucide="settings"></i> 任务设置</button>
+        <button class="tab-btn" id="tab-git" data-tab="git" role="tab" aria-selected="false" aria-controls="panel-git"><i data-lucide="git-branch"></i> Git</button>
         <button class="tab-btn" id="tab-terminal" data-tab="terminal" role="tab" aria-selected="false" aria-controls="panel-terminal"><i data-lucide="terminal"></i> 循环终端</button>
         <button class="tab-btn" id="tab-debug" data-tab="debug" role="tab" aria-selected="false" aria-controls="panel-debug"><i data-lucide="bug"></i> 调试日志</button>
       </div>
@@ -1350,6 +1430,32 @@
                 <input type="number" id="hard-stop-timeout-seconds" min="0" step="1" placeholder="900">
                 <div class="hint">0=关闭，单轮最长运行时长</div>
                 <div class="hint runtime-countdown" id="hard-stop-countdown">硬中断倒计时: --</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="panel-git" data-tab-panel="git" role="tabpanel" aria-labelledby="tab-git" hidden>
+          <div class="git-panel">
+            <div class="git-toolbar">
+              <div class="git-repo-path" id="git-repo-path">仓库路径: --</div>
+              <button type="button" class="git-refresh-btn" id="git-refresh-btn">
+                <i data-lucide="refresh-cw"></i> 刷新
+              </button>
+            </div>
+
+            <div class="git-grid">
+              <div class="git-card">
+                <div class="git-card-title">仓库状态</div>
+                <pre class="git-content" id="git-status-content">请选择项目并点击刷新</pre>
+              </div>
+              <div class="git-card">
+                <div class="git-card-title">分支列表（本地 / 远程）</div>
+                <pre class="git-content" id="git-branches-content">--</pre>
+              </div>
+              <div class="git-card full">
+                <div class="git-card-title">最近提交（20条）</div>
+                <pre class="git-content" id="git-commits-content">--</pre>
               </div>
             </div>
           </div>
