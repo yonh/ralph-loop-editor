@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Output as ProcessOutput;
 use std::sync::{Mutex, LazyLock};
 use std::thread;
 use std::time::Duration;
@@ -251,6 +252,179 @@ fn compact_process_output(bytes: &[u8]) -> String {
     } else {
         raw
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRepoStatus {
+    pub repo_path: String,
+    pub branch: String,
+    pub ahead: u32,
+    pub behind: u32,
+    pub changed_files_count: u32,
+    pub staged_count: u32,
+    pub unstaged_count: u32,
+    pub untracked_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchList {
+    pub current: Option<String>,
+    pub locals: Vec<String>,
+    pub remotes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitCommitEntry {
+    pub hash_short: String,
+    pub subject: String,
+    pub author: String,
+    pub datetime: String,
+}
+
+#[derive(Debug, Default)]
+struct ParsedGitStatus {
+    branch: String,
+    ahead: u32,
+    behind: u32,
+    changed_files_count: u32,
+    staged_count: u32,
+    unstaged_count: u32,
+    untracked_count: u32,
+}
+
+fn parse_ahead_behind(segment: &str) -> (u32, u32) {
+    let mut ahead = 0_u32;
+    let mut behind = 0_u32;
+    for part in segment.split(',') {
+        let item = part.trim();
+        if let Some(value) = item.strip_prefix("ahead ") {
+            ahead = value.trim().parse::<u32>().unwrap_or(0);
+        } else if let Some(value) = item.strip_prefix("behind ") {
+            behind = value.trim().parse::<u32>().unwrap_or(0);
+        }
+    }
+    (ahead, behind)
+}
+
+fn parse_branch_name(header: &str) -> (String, u32, u32) {
+    let normalized = header.strip_prefix("## ").unwrap_or(header).trim();
+    let (main_part, tracking_part) = if let Some(start) = normalized.find(" [") {
+        let end = normalized.rfind(']').unwrap_or(normalized.len());
+        (&normalized[..start], Some(&normalized[start + 2..end]))
+    } else {
+        (normalized, None)
+    };
+
+    let branch = if main_part.starts_with("HEAD") {
+        "HEAD".to_string()
+    } else {
+        main_part
+            .split("...")
+            .next()
+            .unwrap_or(main_part)
+            .trim()
+            .to_string()
+    };
+
+    let (ahead, behind) = tracking_part
+        .map(parse_ahead_behind)
+        .unwrap_or((0, 0));
+    (branch, ahead, behind)
+}
+
+fn parse_git_status_porcelain(output: &str) -> ParsedGitStatus {
+    let mut parsed = ParsedGitStatus::default();
+    let mut changed_files_count = 0_u32;
+    let mut staged_count = 0_u32;
+    let mut unstaged_count = 0_u32;
+    let mut untracked_count = 0_u32;
+
+    for (index, raw_line) in output.lines().enumerate() {
+        if index == 0 && raw_line.starts_with("## ") {
+            let (branch, ahead, behind) = parse_branch_name(raw_line);
+            parsed.branch = branch;
+            parsed.ahead = ahead;
+            parsed.behind = behind;
+            continue;
+        }
+
+        if raw_line.len() < 2 {
+            continue;
+        }
+        let bytes = raw_line.as_bytes();
+        let x = bytes[0] as char;
+        let y = bytes[1] as char;
+
+        if x == '!' && y == '!' {
+            continue;
+        }
+
+        if x == '?' && y == '?' {
+            untracked_count += 1;
+            changed_files_count += 1;
+            continue;
+        }
+
+        if x != ' ' {
+            staged_count += 1;
+            changed_files_count += 1;
+        }
+        if y != ' ' {
+            unstaged_count += 1;
+            if x == ' ' {
+                changed_files_count += 1;
+            }
+        }
+    }
+
+    parsed.changed_files_count = changed_files_count;
+    parsed.staged_count = staged_count;
+    parsed.unstaged_count = unstaged_count;
+    parsed.untracked_count = untracked_count;
+    parsed
+}
+
+async fn run_git_command(work_dir: &str, args: &[&str]) -> Result<ProcessOutput, String> {
+    Command::new("git")
+        .args(args)
+        .current_dir(work_dir)
+        .output()
+        .await
+        .map_err(|err| format!("执行 git 命令失败 {:?}: {}", args, err))
+}
+
+fn build_git_failure_message(args: &[&str], output: &ProcessOutput) -> String {
+    format!(
+        "git {:?} 执行失败。code={:?}, stdout='{}', stderr='{}'",
+        args,
+        output.status.code(),
+        compact_process_output(&output.stdout),
+        compact_process_output(&output.stderr)
+    )
+}
+
+async fn ensure_git_repository(work_dir: &str) -> Result<(), String> {
+    if work_dir.trim().is_empty() {
+        return Err("工作目录不能为空".to_string());
+    }
+
+    if !Path::new(work_dir).is_dir() {
+        return Err(format!("工作目录不存在或不是目录: {}", work_dir));
+    }
+
+    let output = run_git_command(work_dir, &["rev-parse", "--is-inside-work-tree"]).await?;
+    if !output.status.success() {
+        return Err(format!(
+            "当前目录不是 Git 仓库: {}",
+            compact_process_output(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout != "true" {
+        return Err("当前目录不是 Git 工作区".to_string());
+    }
+    Ok(())
 }
 
 fn extract_openai_text(response_json: &Value) -> Option<String> {
@@ -1151,6 +1325,119 @@ async fn optimize_prompt(work_dir: Option<String>, prompt: String) -> Result<Str
 /// Detects the Claude CLI absolute path from current system PATH.
 fn detect_claude_cli_path() -> Result<Option<String>, String> {
     Ok(resolve_executable_from_path("claude"))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Returns git status summary for one work directory.
+async fn git_get_repo_status(work_dir: String) -> Result<GitRepoStatus, String> {
+    let normalized_work_dir = work_dir.trim();
+    ensure_git_repository(normalized_work_dir).await?;
+
+    let args = ["status", "--porcelain=v1", "--branch"];
+    let output = run_git_command(normalized_work_dir, &args).await?;
+    if !output.status.success() {
+        return Err(build_git_failure_message(&args, &output));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed = parse_git_status_porcelain(&stdout);
+    Ok(GitRepoStatus {
+        repo_path: normalized_work_dir.to_string(),
+        branch: if parsed.branch.is_empty() { "HEAD".to_string() } else { parsed.branch },
+        ahead: parsed.ahead,
+        behind: parsed.behind,
+        changed_files_count: parsed.changed_files_count,
+        staged_count: parsed.staged_count,
+        unstaged_count: parsed.unstaged_count,
+        untracked_count: parsed.untracked_count,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Returns local and remote branch names for one work directory.
+async fn git_list_branches(work_dir: String) -> Result<GitBranchList, String> {
+    let normalized_work_dir = work_dir.trim();
+    ensure_git_repository(normalized_work_dir).await?;
+
+    let current_args = ["branch", "--show-current"];
+    let current_output = run_git_command(normalized_work_dir, &current_args).await?;
+    if !current_output.status.success() {
+        return Err(build_git_failure_message(&current_args, &current_output));
+    }
+    let current = {
+        let value = String::from_utf8_lossy(&current_output.stdout).trim().to_string();
+        if value.is_empty() { None } else { Some(value) }
+    };
+
+    let locals_args = ["branch", "--format=%(refname:short)"];
+    let locals_output = run_git_command(normalized_work_dir, &locals_args).await?;
+    if !locals_output.status.success() {
+        return Err(build_git_failure_message(&locals_args, &locals_output));
+    }
+    let mut locals: Vec<String> = String::from_utf8_lossy(&locals_output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    locals.sort_unstable();
+    locals.dedup();
+
+    let remotes_args = ["branch", "--remotes", "--format=%(refname:short)"];
+    let remotes_output = run_git_command(normalized_work_dir, &remotes_args).await?;
+    if !remotes_output.status.success() {
+        return Err(build_git_failure_message(&remotes_args, &remotes_output));
+    }
+    let mut remotes: Vec<String> = String::from_utf8_lossy(&remotes_output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    remotes.sort_unstable();
+    remotes.dedup();
+
+    Ok(GitBranchList {
+        current,
+        locals,
+        remotes,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+/// Returns recent commits from one work directory.
+async fn git_list_recent_commits(work_dir: String, limit: Option<u32>) -> Result<Vec<GitCommitEntry>, String> {
+    let normalized_work_dir = work_dir.trim();
+    ensure_git_repository(normalized_work_dir).await?;
+
+    let normalized_limit = limit.unwrap_or(20).clamp(1, 100);
+    let limit_arg = format!("-n{}", normalized_limit);
+    let pretty_arg = "--pretty=format:%h%x1f%an%x1f%ad%x1f%s";
+    let args = ["log", "--date=iso-strict", pretty_arg, &limit_arg];
+    let output = run_git_command(normalized_work_dir, &args).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if stderr.contains("does not have any commits yet") {
+            return Ok(Vec::new());
+        }
+        return Err(build_git_failure_message(&args, &output));
+    }
+
+    let commits = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\u{001f}').collect();
+            if parts.len() != 4 {
+                return None;
+            }
+            Some(GitCommitEntry {
+                hash_short: parts[0].trim().to_string(),
+                author: parts[1].trim().to_string(),
+                datetime: parts[2].trim().to_string(),
+                subject: parts[3].trim().to_string(),
+            })
+        })
+        .collect();
+
+    Ok(commits)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -2170,6 +2457,9 @@ pub fn run() {
             optimize_prompt,
             optimize_prompt_api,
             detect_claude_cli_path,
+            git_get_repo_status,
+            git_list_branches,
+            git_list_recent_commits,
             get_project_enabled,
             set_project_enabled,
             get_runtime_debug_state,
@@ -2276,5 +2566,36 @@ mod tests {
 
         let project: Project = serde_json::from_str(raw).expect("project json should parse");
         assert!(project.prompt_history.is_empty());
+    }
+
+    #[test]
+    fn parse_git_status_branch_and_counts() {
+        let sample = "\
+## main...origin/main [ahead 2, behind 1]
+ M src/main.js
+M  src-tauri/src/lib.rs
+?? new-file.txt
+";
+
+        let parsed = parse_git_status_porcelain(sample);
+        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.ahead, 2);
+        assert_eq!(parsed.behind, 1);
+        assert_eq!(parsed.changed_files_count, 3);
+        assert_eq!(parsed.staged_count, 1);
+        assert_eq!(parsed.unstaged_count, 1);
+        assert_eq!(parsed.untracked_count, 1);
+    }
+
+    #[test]
+    fn parse_git_status_handles_detached_head() {
+        let sample = "\
+## HEAD (no branch)
+";
+
+        let parsed = parse_git_status_porcelain(sample);
+        assert_eq!(parsed.branch, "HEAD");
+        assert_eq!(parsed.ahead, 0);
+        assert_eq!(parsed.behind, 0);
     }
 }
