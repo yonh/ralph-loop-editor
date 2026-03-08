@@ -18,7 +18,9 @@ import {
   Edit2,
   Trash2,
   Settings,
-  WandSparkles
+  WandSparkles,
+  GitBranch,
+  RefreshCw
 } from 'lucide';
 import { TerminalComponent } from './js/terminal.js';
 import { ProjectManager } from './js/project-manager.js';
@@ -37,7 +39,9 @@ const icons = {
   Edit2,
   Trash2,
   Settings,
-  WandSparkles
+  WandSparkles,
+  GitBranch,
+  RefreshCw
 };
 let invoke = null;
 let terminalComponent = null;
@@ -522,6 +526,11 @@ const taskPlanCancelBtn = document.getElementById('task-plan-cancel-btn');
 const taskPlanConfirmBtn = document.getElementById('task-plan-confirm-btn');
 const taskPlanSummary = document.getElementById('task-plan-summary');
 const taskPlanList = document.getElementById('task-plan-list');
+const gitRepoPath = document.getElementById('git-repo-path');
+const gitStatusContent = document.getElementById('git-status-content');
+const gitBranchesContent = document.getElementById('git-branches-content');
+const gitCommitsContent = document.getElementById('git-commits-content');
+const gitRefreshBtn = document.getElementById('git-refresh-btn');
 let currentPromptHistoryEntries = [];
 
 function getPromptHistoryEntries(project) {
@@ -1236,6 +1245,10 @@ function switchLogTab(tab, options = {}) {
   if (nextTab === 'terminal' && focusTerminal && terminalComponent) {
     terminalComponent.focus();
   }
+
+  if (nextTab === 'git') {
+    void refreshGitPanel();
+  }
 }
 
 function setupLogTabs() {
@@ -1278,6 +1291,98 @@ function setupLogTabs() {
 
   const initiallyActiveButton = tabButtons.find((button) => button.classList.contains('active'));
   switchLogTab(initiallyActiveButton?.dataset.tab || tabButtons[0]?.dataset.tab, { focusTerminal: false });
+}
+
+function renderGitPanelEmpty(message, repoPathText = '--') {
+  if (gitRepoPath) {
+    gitRepoPath.textContent = `仓库路径: ${repoPathText}`;
+  }
+  if (gitStatusContent) {
+    gitStatusContent.textContent = message;
+  }
+  if (gitBranchesContent) {
+    gitBranchesContent.textContent = '--';
+  }
+  if (gitCommitsContent) {
+    gitCommitsContent.textContent = '--';
+  }
+}
+
+function formatGitStatus(status) {
+  return [
+    `分支: ${status.branch || '--'}`,
+    `ahead/behind: +${status.ahead || 0} / -${status.behind || 0}`,
+    `变更文件数: ${status.changed_files_count || 0}`,
+    `已暂存: ${status.staged_count || 0}`,
+    `未暂存: ${status.unstaged_count || 0}`,
+    `未跟踪: ${status.untracked_count || 0}`,
+  ].join('\n');
+}
+
+function formatGitBranches(branches) {
+  const current = branches?.current ? `当前分支: ${branches.current}` : '当前分支: HEAD(分离头指针)';
+  const locals = Array.isArray(branches?.locals) ? branches.locals : [];
+  const remotes = Array.isArray(branches?.remotes) ? branches.remotes : [];
+  const localText = locals.length > 0 ? locals.map((item) => `  - ${item}`).join('\n') : '  (无)';
+  const remoteText = remotes.length > 0 ? remotes.map((item) => `  - ${item}`).join('\n') : '  (无)';
+  return `${current}\n\n本地分支:\n${localText}\n\n远程分支:\n${remoteText}`;
+}
+
+function formatGitCommits(commits) {
+  if (!Array.isArray(commits) || commits.length === 0) {
+    return '(暂无提交记录)';
+  }
+  return commits
+    .map((entry) => `${entry.hash_short}  ${entry.datetime}  ${entry.author}\n${entry.subject}`)
+    .join('\n\n');
+}
+
+async function refreshGitPanel() {
+  if (!gitStatusContent || !gitBranchesContent || !gitCommitsContent || !gitRepoPath) {
+    return;
+  }
+
+  const currentProject = getCurrentProject();
+  if (!currentProject) {
+    renderGitPanelEmpty('请先在左侧选择一个项目');
+    return;
+  }
+
+  const workDir = String(currentProject.work_directory || '').trim();
+  if (!workDir) {
+    renderGitPanelEmpty('当前项目未配置工作目录', '--');
+    return;
+  }
+
+  if (gitRefreshBtn) {
+    gitRefreshBtn.disabled = true;
+  }
+  gitRepoPath.textContent = `仓库路径: ${workDir}`;
+  gitStatusContent.textContent = '加载中...';
+  gitBranchesContent.textContent = '加载中...';
+  gitCommitsContent.textContent = '加载中...';
+
+  try {
+    const [status, branches, commits] = await Promise.all([
+      invokeWithDebug('git_get_repo_status', { work_dir: workDir }),
+      invokeWithDebug('git_list_branches', { work_dir: workDir }),
+      invokeWithDebug('git_list_recent_commits', { work_dir: workDir, limit: 20 }),
+    ]);
+
+    gitRepoPath.textContent = `仓库路径: ${status.repo_path || workDir}`;
+    gitStatusContent.textContent = formatGitStatus(status || {});
+    gitBranchesContent.textContent = formatGitBranches(branches || {});
+    gitCommitsContent.textContent = formatGitCommits(commits || []);
+  } catch (error) {
+    const message = serializeDebugValue(error);
+    gitStatusContent.textContent = `加载失败:\n${message}`;
+    gitBranchesContent.textContent = '--';
+    gitCommitsContent.textContent = '--';
+  } finally {
+    if (gitRefreshBtn) {
+      gitRefreshBtn.disabled = false;
+    }
+  }
 }
 
 /**
@@ -1715,6 +1820,7 @@ function handleProjectChange(project) {
   }
 
   renderSelectedProjectTerminalHistory(project);
+  void refreshGitPanel();
   syncUI();
   void refreshBackendDebugState().then(() => pollCurrentProjectOutput());
 }
@@ -1902,6 +2008,7 @@ async function handleStart(options = {}) {
     triggerSource = 'manual',
     skipTaskPlanReview = false
   } = options;
+  const shouldSkipTaskPlanReview = skipTaskPlanReview || triggerSource === 'auto-next';
   let currentProject = projectManager?.getCurrentProject();
   const targetProjectId = projectId || currentProject?.id || null;
 
@@ -1925,7 +2032,7 @@ async function handleStart(options = {}) {
     return;
   }
 
-  if (!skipTaskPlanReview) {
+  if (!shouldSkipTaskPlanReview) {
     const promptSeed = String(promptInput.value || '').trim()
       || appUISettings.defaultPrompt.trim()
       || currentProject.description
@@ -2170,7 +2277,8 @@ async function triggerAutoNextLoop(projectId) {
     await handleStart({
       projectId,
       preserveTerminalHistory: true,
-      triggerSource: 'auto-next'
+      triggerSource: 'auto-next',
+      skipTaskPlanReview: true
     });
   } catch (err) {
     appendDebugLog('auto-next failed', err);
@@ -2396,6 +2504,11 @@ if (hardStopTimeoutInput) {
 }
 if (promptAiOptimizeBtn) {
   promptAiOptimizeBtn.addEventListener('click', handlePromptAiOptimize);
+}
+if (gitRefreshBtn) {
+  gitRefreshBtn.addEventListener('click', () => {
+    void refreshGitPanel();
+  });
 }
 if (promptHistoryBtn) {
   promptHistoryBtn.addEventListener('click', openPromptHistoryModal);
